@@ -1,5 +1,5 @@
 # Modify standard Rust image
-FROM rust:latest as build
+FROM docker.io/rust:latest as build
 
 ENV USER=canaryuser
 ENV UID=12345
