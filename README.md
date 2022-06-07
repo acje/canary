@@ -2,15 +2,15 @@
 
 ![Docker Pulls](https://img.shields.io/docker/pulls/acje/canary)
 
-Canary has only one feature. It replies "Canary is alive!".
+Canary has only one feature. It replies "Canary is alive!". And does some logging server side.
 
-Buildt in Rust with the Actix-web 3 framework on distroless image.
+Buildt in Rust with the Actix-web 4 framework on distroless image.
 
 <https://hub.docker.com/r/acje/canary/>
 
 Run:
 
-docker run -e "PORT=8080" -p 8080:8080 acje/canary:latest
+podman run -e "PORT=8080" -p 8080:8080 acje/canary:latest
 
 Response at <http://localhost:8080/>
 
