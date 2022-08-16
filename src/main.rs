@@ -1,3 +1,4 @@
+#![warn(clippy::pedantic)]
 use actix_web::{middleware, web, App, HttpServer};
 use std::env;
 use std::net::SocketAddr;
