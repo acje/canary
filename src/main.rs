@@ -1,12 +1,11 @@
 use actix_web::{middleware, web, App, HttpServer};
 use std::env;
+use std::net::SocketAddr;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     std::env::set_var("RUST_LOG", "actix_web=info");
     env_logger::init();
-
-    use std::net::SocketAddr;
 
     HttpServer::new(|| {
         App::new()
