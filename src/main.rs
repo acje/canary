@@ -1,5 +1,5 @@
 #![warn(clippy::pedantic)]
-use actix_web::{middleware, web, App, HttpServer};
+use actix_web::{get, middleware, web, App, HttpServer, Responder};
 use std::env;
 use std::net::SocketAddr;
 
@@ -10,17 +10,17 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(|| {
         App::new()
-            // enable logger
-            .wrap(middleware::Logger::default())
-            .service(web::resource("/").to(chirp))
+            .wrap(middleware::Logger::default()) // enable logger
+            .service(chirp)
     })
     .bind(SocketAddr::from(([0, 0, 0, 0], get_server_port())))?
     .run()
     .await
 }
 
-async fn chirp() -> &'static str {
-    "Canary 0.44.0 is alive!\r\n"
+#[get("/")]
+async fn chirp() -> impl Responder {
+    "Canary 0.45.0 is alive!\r\n"
 }
 
 // Get the port number to listen on or fail fast.
