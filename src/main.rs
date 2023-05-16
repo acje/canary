@@ -1,5 +1,5 @@
 #![warn(clippy::pedantic)]
-use actix_web::{get, middleware, web, App, HttpServer, Responder};
+use actix_web::{get, middleware, App, HttpServer, Responder};
 use std::env;
 use std::net::SocketAddr;
 
