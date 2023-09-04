@@ -4,7 +4,7 @@
 
 Canary has only one feature. It replies "Canary [version] is alive!". And does some logging server side.
 
-Buildt in Rust with the Actix-web 4 framework on distroless image.
+Rust/Actix-web 4
 
 <https://hub.docker.com/r/acje/canary/>
 
