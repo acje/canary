@@ -24,7 +24,7 @@ COPY . .
 RUN cargo build --release 
 
 # Final Docker build Stage
-FROM gcr.io/distroless/base-nossl-debian12
+FROM debian:bookworm-slim
 COPY --from=build /usr/src/canary/target/release/canary .
 COPY --from=build /etc/passwd /etc/passwd
 USER canaryuser
