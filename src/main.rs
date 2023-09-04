@@ -18,6 +18,7 @@ async fn main() -> std::io::Result<()> {
     .await
 }
 
+#[allow(clippy::unused_async)]
 #[get("/")]
 async fn chirp() -> impl Responder {
     "Canary 0.47.0 is alive!\r\n"
