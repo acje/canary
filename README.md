@@ -13,6 +13,3 @@ Run:
 podman run -e "PORT=8080" -p 8080:8080 acje/canary:latest
 
 Response at <http://localhost:8080/>
-
-On cloud run:
-<https://canary-app-acje-qvw63kdulq-ue.a.run.app/>
