@@ -443,7 +443,7 @@ impl LogQueue {
     /// The count of records rejected since construction, saturating at
     /// `u64::MAX`.
     #[must_use]
-    pub const fn dropped(&self) -> u64 {
+    pub(crate) const fn dropped(&self) -> u64 {
         self.dropped
     }
 
