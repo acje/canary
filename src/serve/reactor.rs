@@ -692,6 +692,13 @@ impl Reactor {
     /// edge-triggered poller announces the readiness that carried a partial head
     /// once, so a peer that half-closed behind its bytes would otherwise wait out
     /// its deadline instead of earning its `400`.
+    ///
+    /// A read that answers [`ErrorKind::WouldBlock`] ends the visit, one that
+    /// answers [`ErrorKind::Interrupted`] retries within the remaining budget,
+    /// and every other read error closes and releases the slot without a reply.
+    /// The kind of that error is deliberately not distinguished: the connection
+    /// is unusable either way, and neither path moves the served or rejected
+    /// counters.
     fn read_ready(&mut self, index: usize) -> Result<bool, ServeError> {
         let Some(room) = self.slots.head_room(index) else {
             return Ok(false);
@@ -990,7 +997,7 @@ impl Reactor {
     }
 }
 
-/// The bytes a stored pending reply writes.
+/// The bytes the slot's reply choice selects from the plan.
 fn reply_bytes(plan: &ResponsePlan, pending: ReplyChoice) -> &[u8] {
     match pending {
         ReplyChoice::Matched(request) => match plan.reply(request) {

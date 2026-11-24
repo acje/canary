@@ -36,7 +36,7 @@ pub const CONNECTION_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The bytes a slot may spend beyond its head buffer, covering the stream
 /// handle, the absolute deadline, the connection tag, the write cursor, and the
-/// pending-reply tag.
+/// reply-choice tag.
 pub(crate) const SLOT_METADATA_BYTES: usize = 128;
 
 /// The bytes the whole slot table may occupy.
