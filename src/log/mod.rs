@@ -13,16 +13,16 @@
 //! - `level=info kind=tick served=<count> rejected=<count> dropped=<count>`.
 //! - `level=info kind=shutdown served=<count> rejected=<count> dropped=<count>`.
 //! - `level=warn kind=filter_default` with no fields.
+//! - `level=warn kind=sink_failure failures=<count>`.
 //!
 //! Values are never free-form: an address is `SocketAddr`'s `Display` form and a
 //! counter is unsigned decimal, so a value cannot contain a space, `=`, or a
 //! line break. The grammar therefore needs no escaping.
 //!
 //! [`LogFilter::allows`] is the only filter decision. Startup, tick, and
-//! shutdown records are [`Level::Info`]; the filter-defaulted notice is
-//! [`Level::Warn`]; a sink-failure record joins it at [`Level::Warn`] when the
-//! reactor owns retry scheduling. Records leave the queue through
-//! [`sink::drain`], which never blocks and never allocates.
+//! shutdown records are [`Level::Info`]; the filter-defaulted and sink-failure
+//! notices are [`Level::Warn`]. Records leave the queue through [`sink::drain`],
+//! which never blocks and never allocates.
 
 pub mod sink;
 
@@ -63,16 +63,23 @@ const COUNTER_PREFIX_BYTES: usize =
 
 const FILTER_DEFAULT_BYTES: usize = "level=warn kind=filter_default\r\n".len();
 
+const SINK_FAILURE_PREFIX_BYTES: usize =
+    "level=warn kind=sink_failure failures=".len() + "\r\n".len();
+
 /// The largest startup line: the prefix plus a maximal address.
 const MAX_STARTUP_BYTES: usize = STARTUP_PREFIX_BYTES + MAX_SOCKET_ADDR_TEXT;
 
 /// The largest counter line: three maximal `u64` fields.
 const MAX_COUNTER_BYTES: usize = COUNTER_PREFIX_BYTES + 3 * MAX_DECIMAL_U64;
 
+/// The largest sink-failure line: the prefix plus a maximal `u64` count.
+const MAX_SINK_FAILURE_BYTES: usize = SINK_FAILURE_PREFIX_BYTES + MAX_DECIMAL_U64;
+
 const _: () = assert!(QUEUE_SLOTS.is_power_of_two());
 const _: () = assert!(MAX_STARTUP_BYTES <= SLOT_BYTES);
 const _: () = assert!(MAX_COUNTER_BYTES <= SLOT_BYTES);
 const _: () = assert!(FILTER_DEFAULT_BYTES <= SLOT_BYTES);
+const _: () = assert!(MAX_SINK_FAILURE_BYTES <= SLOT_BYTES);
 
 /// The severity a record carries, the only input to the filter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +89,12 @@ pub enum Level {
     /// Recoverable degradations that the operator should see by default.
     Warn,
     /// Failures that always survive the filter except [`LogFilter::Off`].
+    ///
+    /// The variant is the closed ceiling of [`LogFilter`] and carries no record:
+    /// every degradation this service can observe while it serves — a lost
+    /// queue slot, a refused or failed sink — is recoverable, so it is reported
+    /// at [`Level::Warn`]. A record reaches this level only when an outcome ends
+    /// serving, which is a process exit rather than a log line.
     Error,
 }
 
@@ -205,6 +218,11 @@ pub enum Record {
     },
     /// `RUST_LOG` was absent or unrecognised, so the filter defaulted to info.
     FilterDefaulted,
+    /// A drain the sink failed, reported once per failure episode.
+    SinkFailure {
+        /// The failed drains counted since startup.
+        failures: u64,
+    },
 }
 
 impl Record {
@@ -213,7 +231,7 @@ impl Record {
     pub const fn level(self) -> Level {
         match self {
             Self::Startup { .. } | Self::Tick { .. } | Self::Shutdown { .. } => Level::Info,
-            Self::FilterDefaulted => Level::Warn,
+            Self::FilterDefaulted | Self::SinkFailure { .. } => Level::Warn,
         }
     }
 
@@ -238,6 +256,12 @@ impl Record {
                 "level={level} kind=shutdown served={served} rejected={rejected} dropped={dropped}\r\n"
             ),
             Self::FilterDefaulted => write!(slot, "level={level} kind=filter_default\r\n"),
+            Self::SinkFailure { failures } => {
+                write!(
+                    slot,
+                    "level={level} kind=sink_failure failures={failures}\r\n"
+                )
+            }
         }
     }
 }
@@ -455,8 +479,8 @@ impl fmt::Write for Slot {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConsumeOutcome, Level, LogFilter, LogStore, LogStoreError, QUEUE_BYTES, QUEUE_SLOTS,
-        Record, SLOT_BYTES, Slot, WriteOutcome,
+        ConsumeOutcome, Level, LogFilter, LogStore, LogStoreError, MAX_SINK_FAILURE_BYTES,
+        QUEUE_BYTES, QUEUE_SLOTS, Record, SLOT_BYTES, Slot, WriteOutcome,
     };
     use std::fmt::Write as _;
     use std::net::SocketAddr;
@@ -559,6 +583,32 @@ mod tests {
     }
 
     #[test]
+    fn sink_failure_record_renders_exact_bytes() {
+        let mut store = store();
+        assert_eq!(
+            store.write(LogFilter::Info, Record::SinkFailure { failures: 7 }),
+            WriteOutcome::Written
+        );
+        assert_eq!(
+            store.unwritten_front().unwrap(),
+            b"level=warn kind=sink_failure failures=7\r\n"
+        );
+    }
+
+    #[test]
+    fn a_maximal_sink_failure_count_fills_exactly_its_reserved_line() {
+        let mut store = store();
+        let record = Record::SinkFailure { failures: u64::MAX };
+        assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+        let front = store.unwritten_front().unwrap();
+        assert_eq!(
+            front,
+            b"level=warn kind=sink_failure failures=18446744073709551615\r\n"
+        );
+        assert_eq!(front.len(), MAX_SINK_FAILURE_BYTES);
+    }
+
+    #[test]
     fn maximal_counters_fit_one_slot() {
         let mut store = store();
         let record = Record::Tick {
@@ -585,8 +635,9 @@ mod tests {
     }
 
     #[test]
-    fn record_levels_are_info_except_the_filter_notice() {
+    fn record_levels_are_info_except_the_warn_notices() {
         assert_eq!(Record::FilterDefaulted.level(), Level::Warn);
+        assert_eq!(Record::SinkFailure { failures: 1 }.level(), Level::Warn);
         assert_eq!(
             Record::Startup {
                 bind: address("0.0.0.0:1")

@@ -1,33 +1,45 @@
 //! The single-owner mio reactor turn.
 //!
-//! [`Reactor`] owns the listening socket, the fixed slot table, and the poller.
-//! One turn is two calls. [`Reactor::wait`] derives a timeout from the instant a
-//! caller sampled before it waits, polls, and snapshots the readiness it
-//! collected. [`Reactor::turn`] then runs a fixed, bounded sequence over that
-//! snapshot at the instant sampled after the wait returned: the listener accept
-//! (at most [`ACCEPT_PER_TURN`]), one visit to each connection that had an event
-//! (at most [`MAX_EVENTS`], each visited once), the absolute-deadline sweep, and
-//! exactly one bounded log drain. No step can exceed its budget, so a turn is
-//! bounded by construction and never blocks on a socket or on the sink.
+//! [`Reactor`] owns the listening socket, the fixed slot table, the shutdown
+//! self-pipe, and the poller. One turn is two calls. [`Reactor::wait`] derives a
+//! timeout from the instant a caller sampled before it waits, polls, and
+//! snapshots the readiness it collected. [`Reactor::turn`] then runs a fixed,
+//! bounded sequence over that snapshot at the instant sampled after the wait
+//! returned: the shutdown step (at most [`SIGNAL_READS_PER_TURN`] reads), the
+//! listener accept (at most [`ACCEPT_PER_TURN`]), one visit to each connection
+//! that had an event (at most [`MAX_EVENTS`], each visited once), the
+//! absolute-deadline sweep, the aggregate tick, and exactly one bounded log
+//! drain. No step can exceed its budget, so a turn is bounded by construction and
+//! never blocks on a socket, on the signal pipe, or on the sink.
 //!
-//! The signal token is reserved for the source that reports shutdown; it is not
-//! registered here, and the signal step ahead of the listener arrives with it.
+//! The signal token carries shutdown. [`ShutdownSignals`] owns the read end of a
+//! self-pipe and the write end a registered handler writes one byte to, and
+//! [`Reactor::new`] registers the read end at [`TOKEN_SIGNAL`]. The turn that
+//! observes the token drains the pipe, latches the request, and reports
+//! [`TurnOutcome::ShuttingDown`] before any other step; a second signal is
+//! absorbed by the latch. [`Reactor::shutdown`] is then the one bounded flush.
 //!
 //! [`Reactor::next_deadline`] is the only timer owner: the earliest connection
-//! deadline, the accept backlog a budget-cut batch left behind, or the log retry
-//! a stalled, failed, or unfinished drain schedules.
+//! deadline, the accept backlog a budget-cut batch left behind, the aggregate
+//! tick the counters moved ahead of, or the log retry a stalled, failed, or
+//! unfinished drain schedules.
 
 use std::fmt;
-use std::io::{ErrorKind, Read as _, Write};
+use std::io::{self, ErrorKind, PipeWriter, Read, Write};
+use std::os::fd::OwnedFd;
 use std::time::{Duration, Instant};
 
 use mio::net::TcpListener;
+use mio::unix::pipe::Receiver;
 use mio::{Events, Interest, Poll, Token};
+use signal_hook::SigId;
+use signal_hook::consts::{SIGINT, SIGTERM};
+use signal_hook::low_level::pipe as signal_pipe;
 
 use crate::exit::ExitCode;
 use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, Reply, ResponsePlan};
-use crate::log::sink::{self, DrainBudget, DrainOutcome, LOG_RETRY};
-use crate::log::{LogFilter, LogStore};
+use crate::log::sink::{self, DrainBudget, DrainOutcome, LOG_RETRY, SHUTDOWN_DRAIN};
+use crate::log::{LogFilter, LogStore, Record, WriteOutcome};
 
 use super::MAX_CONNECTIONS;
 use super::slots::{Pending, Phase, ReadOutcome, Slots, WriteProgress};
@@ -35,10 +47,10 @@ use super::slots::{Pending, Phase, ReadOutcome, Slots, WriteProgress};
 /// The poll token of the listening socket.
 pub const TOKEN_LISTENER: usize = 0;
 
-/// The poll token reserved for the shutdown signal source.
+/// The poll token of the shutdown self-pipe.
 ///
-/// The source is registered by the increment that adds shutdown handling, so no
-/// event carries this token yet.
+/// [`Reactor::new`] registers the pipe's read end here, so the first turn that
+/// sees the token reports [`TurnOutcome::ShuttingDown`].
 pub const TOKEN_SIGNAL: usize = 1;
 
 /// The poll token of the connection in the first slot.
@@ -59,10 +71,138 @@ pub const WRITE_BYTES_PER_TURN: usize = 512;
 /// The poll token of the last connection slot, which must fit the token space.
 const TOKEN_LAST_CONNECTION: usize = TOKEN_FIRST_CONNECTION + MAX_CONNECTIONS - 1;
 
+/// The interval between two aggregate tick records.
+///
+/// Owner: this reactor. Scope: one reactor, aggregate across connections. Units:
+/// wall-clock time. Limit: one second, so [`Record::Tick`] costs the sink at most
+/// one line per second however much traffic arrives. Exhaustion: a tick the
+/// interval does not admit waits for the next [`Reactor::next_deadline`].
+pub const TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The bytes one turn reads from the shutdown pipe in a single read.
+pub const SIGNAL_DRAIN_BYTES: usize = 64;
+
+/// The reads one turn spends draining the shutdown pipe.
+///
+/// Owner: this reactor's shutdown step. Scope: one turn, the one shutdown pipe.
+/// Units: reads of [`SIGNAL_DRAIN_BYTES`], aggregate per turn. Limit: 8, so a
+/// turn clears up to 512 coalesced signal bytes. Exhaustion: the shutdown
+/// request is latched regardless, and a residue wakes the next turn, which
+/// reports [`TurnOutcome::ShuttingDown`] again.
+pub const SIGNAL_READS_PER_TURN: usize = 8;
+
+/// The number of signals [`ShutdownSignals`] subscribes to.
+const SHUTDOWN_SIGNAL_COUNT: usize = 2;
+
+/// The signals that request a shutdown.
+const SHUTDOWN_SIGNALS: [libc::c_int; SHUTDOWN_SIGNAL_COUNT] = [SIGTERM, SIGINT];
+
 const _: () = assert!(TOKEN_LISTENER < TOKEN_SIGNAL);
 const _: () = assert!(TOKEN_SIGNAL < TOKEN_FIRST_CONNECTION);
 const _: () = assert!(TOKEN_LAST_CONNECTION.checked_add(1).is_some());
 const _: () = assert!(WRITE_BYTES_PER_TURN >= MAX_REPLY_BYTES);
+
+/// The read end of the shutdown self-pipe and the write end the handlers feed.
+///
+/// The read end is the mio source [`Reactor::new`] registers at
+/// [`TOKEN_SIGNAL`]: a registered handler writes one byte into the pipe, so the
+/// poller wakes with the token and the reactor reads the request where an
+/// ordinary turn can act on it.
+///
+/// [`ShutdownSignals::detached`] builds the pipe without touching a process
+/// signal handler, which is how a test drives shutdown by writing a byte into it
+/// itself. [`ShutdownSignals::install`] is the only constructor that registers
+/// handlers, and only the one value it returns owns them: dropping that value
+/// unregisters them.
+///
+/// The write end is kept for the value's lifetime even though the handlers own a
+/// clone of it. A pipe whose write end has no owner left reports end-of-file on
+/// every read while staying readable, so a retained writer is what keeps the
+/// registered source from waking the poller for nothing.
+#[derive(Debug)]
+pub struct ShutdownSignals {
+    receiver: Receiver,
+    writer: PipeWriter,
+    registrations: [Option<SigId>; SHUTDOWN_SIGNAL_COUNT],
+}
+
+impl ShutdownSignals {
+    /// Creates the self-pipe without registering a signal handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system error when the pipe cannot be created or its
+    /// read end cannot be switched to nonblocking mode.
+    pub fn detached() -> io::Result<Self> {
+        let (reader, writer) = io::pipe()?;
+        let receiver = Receiver::from(OwnedFd::from(reader));
+        receiver.set_nonblocking(true)?;
+        Ok(Self {
+            receiver,
+            writer,
+            registrations: [None; SHUTDOWN_SIGNAL_COUNT],
+        })
+    }
+
+    /// Creates the self-pipe and registers `SIGTERM` and `SIGINT` to write into
+    /// it.
+    ///
+    /// Each registration takes ownership of its own clone of the write end, so
+    /// the handlers never share a descriptor with the value this returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ShutdownSignals::detached`]'s error, or the operating system
+    /// error when a write-end clone or a signal registration fails. A failure
+    /// part way through unregisters the signals already registered.
+    pub fn install() -> io::Result<Self> {
+        let mut signals = Self::detached()?;
+        let Self {
+            writer,
+            registrations,
+            ..
+        } = &mut signals;
+        for (registration, signal) in registrations.iter_mut().zip(SHUTDOWN_SIGNALS) {
+            *registration = Some(signal_pipe::register(signal, writer.try_clone()?)?);
+        }
+        Ok(signals)
+    }
+
+    /// Writes one byte through the write end, the way a registered handler does.
+    #[cfg(test)]
+    fn trigger(&mut self) -> io::Result<()> {
+        self.writer.write_all(&[SIGNAL_BYTE])
+    }
+
+    /// The registered read end, for the poller to register.
+    fn receiver_mut(&mut self) -> &mut Receiver {
+        &mut self.receiver
+    }
+}
+
+impl Read for ShutdownSignals {
+    /// Reads what the pipe holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::WouldBlock`] when no byte is pending, and the
+    /// operating system error when the read fails.
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.receiver.read(buffer)
+    }
+}
+
+impl Drop for ShutdownSignals {
+    fn drop(&mut self) {
+        for registration in self.registrations.iter().flatten() {
+            signal_hook::low_level::unregister(*registration);
+        }
+    }
+}
+
+/// The byte a shutdown signal writes into the pipe.
+#[cfg(test)]
+const SIGNAL_BYTE: u8 = b'X';
 
 /// The poll token that names the connection in slot `index`.
 #[must_use]
@@ -103,8 +243,8 @@ pub enum TurnOutcome {
     Idle,
     /// The turn accepted, read, wrote, closed, or drained at least one item.
     Progress,
-    /// The turn observed shutdown. No path constructs this variant until the
-    /// signal source is registered.
+    /// The turn observed shutdown. No later turn does work, so a caller runs
+    /// [`Reactor::shutdown`] and exits.
     ShuttingDown,
 }
 
@@ -123,6 +263,8 @@ pub enum ServeError {
     Register(ErrorKind),
     /// Deregistering a source from the poller failed.
     Deregister(ErrorKind),
+    /// Reading the shutdown self-pipe failed.
+    Signal(ErrorKind),
 }
 
 impl ServeError {
@@ -140,6 +282,7 @@ impl fmt::Display for ServeError {
             Self::Accept(kind) => ("accept", kind),
             Self::Register(kind) => ("register", kind),
             Self::Deregister(kind) => ("deregister", kind),
+            Self::Signal(kind) => ("signal", kind),
         };
         write!(formatter, "reactor {step} failed: {kind:?}")
     }
@@ -147,7 +290,30 @@ impl fmt::Display for ServeError {
 
 impl std::error::Error for ServeError {}
 
-/// The single owner of the listener, the connection slots, and the poller.
+/// The sink's failure state between drains.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SinkHealth {
+    /// The kind of the drain failure the reactor has not yet recovered from.
+    failed: Option<ErrorKind>,
+    /// Whether this failure episode has already queued its record.
+    recorded: bool,
+    /// The failed drains counted since startup.
+    failures: u64,
+}
+
+/// The aggregate counter sample the tick record reports.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TickLedger {
+    /// The instant of the last tick record, absent before the first one.
+    last: Option<Instant>,
+    /// The served count the last tick reported.
+    served: u64,
+    /// The rejected count the last tick reported.
+    rejected: u64,
+}
+
+/// The single owner of the listener, the connection slots, the shutdown source,
+/// and the poller.
 pub struct Reactor {
     poll: Poll,
     listener: TcpListener,
@@ -158,22 +324,34 @@ pub struct Reactor {
     events: Events,
     tokens: [Token; MAX_EVENTS],
     token_count: usize,
+    signals: ShutdownSignals,
+    shutting_down: bool,
+    sink: SinkHealth,
+    tick: TickLedger,
     log_retry_at: Option<Instant>,
     served: u64,
     rejected: u64,
 }
 
 impl Reactor {
-    /// Registers `listener` with the poller and reserves the event buffers.
+    /// Registers `listener` and the shutdown pipe with the poller and reserves
+    /// the event buffers.
     ///
     /// The events buffer is reserved with exactly [`MAX_EVENTS`] slots, so the
     /// token snapshot [`Reactor::wait`] takes can never drop an event the poller
     /// collected.
     ///
+    /// `signals` is the caller's choice of shutdown source: [`ShutdownSignals::install`]
+    /// makes a real signal reach the poller, and [`ShutdownSignals::detached`]
+    /// keeps the process's handlers out of the loop so a test can drive the pipe
+    /// itself. Either way the reactor owns the value, which keeps the pipe's
+    /// write end open for the reactor's lifetime.
+    ///
     /// # Errors
     ///
     /// Returns [`ServeError::Poll`] when the poller cannot be created and
-    /// [`ServeError::Register`] when the listener cannot be registered.
+    /// [`ServeError::Register`] when the listener or the shutdown pipe cannot be
+    /// registered.
     ///
     /// # Panics
     ///
@@ -181,10 +359,21 @@ impl Reactor {
     /// [`MAX_EVENTS`]. The poller documents its capacity as the reserved value,
     /// so a rounding change breaks the snapshot invariant and must fail here
     /// rather than serve.
-    pub fn new(mut listener: TcpListener, plan: ResponsePlan) -> Result<Self, ServeError> {
+    pub fn new(
+        mut listener: TcpListener,
+        mut signals: ShutdownSignals,
+        plan: ResponsePlan,
+    ) -> Result<Self, ServeError> {
         let poll = Poll::new().map_err(|error| ServeError::Poll(error.kind()))?;
         poll.registry()
             .register(&mut listener, Token(TOKEN_LISTENER), Interest::READABLE)
+            .map_err(|error| ServeError::Register(error.kind()))?;
+        poll.registry()
+            .register(
+                signals.receiver_mut(),
+                Token(TOKEN_SIGNAL),
+                Interest::READABLE,
+            )
             .map_err(|error| ServeError::Register(error.kind()))?;
         let events = Events::with_capacity(MAX_EVENTS);
         assert_eq!(
@@ -202,10 +391,23 @@ impl Reactor {
             events,
             tokens: [Token(0); MAX_EVENTS],
             token_count: 0,
+            signals,
+            shutting_down: false,
+            sink: SinkHealth::default(),
+            tick: TickLedger::default(),
             log_retry_at: None,
             served: 0,
             rejected: 0,
         })
+    }
+
+    /// Whether a shutdown request has been observed.
+    ///
+    /// A latched request is final: the reactor performs no further work, and
+    /// [`Reactor::shutdown`] is the only step left for its owner.
+    #[must_use]
+    pub const fn is_shutting_down(&self) -> bool {
+        self.shutting_down
     }
 
     /// The requests whose reply the reactor wrote completely.
@@ -231,12 +433,14 @@ impl Reactor {
     /// The instant the next [`TurnWait::UntilDeadline`] wait must wake by.
     ///
     /// The earliest of the occupied slot deadlines, the accept backlog a
-    /// budget-cut batch left behind (reported as `now`), and the log deadline the
+    /// budget-cut batch left behind (reported as `now`), the log deadline the
     /// last drain scheduled (reported as `now` when a productive drain left the
-    /// queue non-empty, and as `now + LOG_RETRY` when it stalled or failed);
-    /// `None` when the reactor owns no timer, which lets the wait block until an
-    /// event arrives. A deadline at or before `now` is reported as `now`, so the
-    /// caller's timeout is zero and never negative.
+    /// queue non-empty, as `now + LOG_RETRY` when it stalled or failed, and as
+    /// `now + LOG_RETRY` after a failure until the retry is due), and the
+    /// aggregate tick deadline while the counters moved ahead of the last
+    /// sample; `None` when the reactor owns no timer, which lets the wait block
+    /// until an event arrives. A deadline at or before `now` is reported as
+    /// `now`, so the caller's timeout is zero and never negative.
     ///
     /// The accept backlog needs a deadline because the kernel poller reports a
     /// listening socket edge-wise: a batch stopped by [`ACCEPT_PER_TURN`] leaves
@@ -249,13 +453,32 @@ impl Reactor {
         if self.accept_backlog {
             return Some(now);
         }
-        let pending = match (self.slots.earliest_deadline(), self.log_retry_at) {
-            (Some(slot), Some(retry)) => Some(slot.min(retry)),
-            (Some(slot), None) => Some(slot),
-            (None, Some(retry)) => Some(retry),
-            (None, None) => None,
-        };
-        pending.map(|deadline| deadline.max(now))
+        [
+            self.slots.earliest_deadline(),
+            self.log_retry_at,
+            self.tick_deadline(now),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|deadline| deadline.max(now))
+    }
+
+    /// The instant the aggregate tick is next due, while the counters moved.
+    ///
+    /// A tick is due [`TICK_INTERVAL`] after the last sample, and at once when no
+    /// sample exists yet, which is why the deadline is `now` for a reactor whose
+    /// counters just left zero.
+    fn tick_deadline(&self, now: Instant) -> Option<Instant> {
+        if !self.tick_moved() {
+            return None;
+        }
+        Some(self.tick.last.map_or(now, |last| last + TICK_INTERVAL))
+    }
+
+    /// Whether the counters moved since the last tick record.
+    fn tick_moved(&self) -> bool {
+        self.served != self.tick.served || self.rejected != self.tick.rejected
     }
 
     /// Waits for readiness and snapshots the tokens [`Reactor::turn`] acts on.
@@ -263,7 +486,11 @@ impl Reactor {
     /// The timeout is [`TurnWait::Immediate`] for no wait, and otherwise the
     /// distance from `now` to [`Reactor::next_deadline`]; a
     /// [`TurnWait::UntilDeadline`] wait that owns no deadline blocks until an
-    /// event arrives.
+    /// event arrives, and the shutdown pipe waking it is one such event.
+    ///
+    /// The snapshot is the whole of what a turn may act on, and every call
+    /// replaces it: a second wait before the turn discards the tokens the first
+    /// collected.
     ///
     /// `now` dates the wait only. A caller samples that instant before this
     /// call and samples a fresh one for [`Reactor::turn`] after it returns, so
@@ -300,20 +527,32 @@ impl Reactor {
     /// moment that may already have passed. The caller's shape is
     /// `wait(before, UntilDeadline)?; turn(store, filter, sink, Instant::now())`.
     ///
-    /// The turn consumes the snapshot, accepts at most [`ACCEPT_PER_TURN`]
-    /// connections, visits each connection with an event at most once, releases
-    /// every connection whose deadline `now` has passed, and drains the log queue
-    /// once. Accepts run before the sweep, which is load-bearing rather than
+    /// A turn acts on the snapshot the last [`Reactor::wait`] took and on nothing
+    /// else, so a turn without a preceding wait sees an empty snapshot and runs
+    /// only the work the deadlines it owns make due.
+    ///
+    /// The shutdown step runs first: a snapshot carrying [`TOKEN_SIGNAL`] drains
+    /// the pipe, latches the request, and returns [`TurnOutcome::ShuttingDown`]
+    /// before any other step, so no accept, read, or write follows a signal. A
+    /// turn after the latch reports the same outcome without doing work, which is
+    /// what absorbs a second signal.
+    ///
+    /// Otherwise the turn consumes the snapshot, accepts at most
+    /// [`ACCEPT_PER_TURN`] connections, visits each connection with an event at
+    /// most once, releases every connection whose deadline `now` has passed,
+    /// queues the aggregate tick when it is due, and drains the log queue once.
+    /// Accepts run before the sweep, which is load-bearing rather than
     /// incidental: no slot is acquired after the visit loop starts, so an index
     /// the sweep releases cannot name a fresh occupant within the same turn.
     ///
-    /// The filter names the threshold the reactor's lifecycle records use; this
-    /// increment derives only the drain, so the value is carried unused.
+    /// The filter names the threshold the reactor's own records use; the drain
+    /// only moves queued bytes, so the record paths are what spend it.
     ///
     /// # Errors
     ///
-    /// Returns the [`ServeError`] of the poller or socket operation that failed.
-    /// A failure leaves the reactor unusable, so a caller must not retry a turn
+    /// Returns the [`ServeError`] of the socket, registration, or signal-pipe
+    /// operation that failed; a poll failure is [`Reactor::wait`]'s alone. A
+    /// failure leaves the reactor unusable, so a caller must not retry a turn
     /// that returned an error; a stream whose registration failed occupies its
     /// slot until the process exits.
     pub fn turn(
@@ -324,6 +563,12 @@ impl Reactor {
         now: Instant,
     ) -> Result<TurnOutcome, ServeError> {
         let count = std::mem::take(&mut self.token_count);
+        if self.tokens[..count].contains(&Token(TOKEN_SIGNAL)) {
+            self.absorb_shutdown()?;
+        }
+        if self.shutting_down {
+            return Ok(TurnOutcome::ShuttingDown);
+        }
         let mut progress = false;
         if self.accept_backlog || self.tokens[..count].contains(&Token(TOKEN_LISTENER)) {
             progress |= self.accept_ready(now)?;
@@ -340,12 +585,107 @@ impl Reactor {
             progress |= self.visit(index)?;
         }
         progress |= self.expire(now)?;
+        progress |= self.tick(store, filter, now);
         progress |= self.drain_logs(store, filter, sink, now);
         Ok(if progress {
             TurnOutcome::Progress
         } else {
             TurnOutcome::Idle
         })
+    }
+
+    /// Flushes the final counter sample and the queue within the shutdown budget.
+    ///
+    /// Queues exactly one [`Record::Shutdown`] carrying the counters and the drop
+    /// count sampled at this instant, then runs exactly one
+    /// [`sink::drain_until`] under [`SHUTDOWN_DRAIN`]: the drain repeats its
+    /// bounded turn while it progresses and the deadline has not passed, so the
+    /// flush is bounded even against a reader that never drains. The sink's
+    /// failure latch does not suppress it — the last attempt is the one worth
+    /// making, and the deadline bounds it.
+    ///
+    /// The caller exits [`ExitCode::Ok`] once this returns, whatever the outcome:
+    /// a shutdown the process was asked for is a successful stop. Records the
+    /// deadline or a failing sink left queued are abandoned with the process —
+    /// the sink failure is already reported by its own record, and the returned
+    /// [`DrainOutcome`] names why the flush ended short.
+    pub fn shutdown(
+        &mut self,
+        store: &mut LogStore,
+        filter: LogFilter,
+        sink: &mut impl Write,
+        now: Instant,
+    ) -> DrainOutcome {
+        let record = Record::Shutdown {
+            served: self.served,
+            rejected: self.rejected,
+            dropped: store.dropped(),
+        };
+        let _ = store.write(filter, record);
+        sink::drain_until(store, sink, DrainBudget::DEFAULT, now + SHUTDOWN_DRAIN)
+    }
+
+    /// Drains whatever the shutdown pipe holds and latches the request.
+    ///
+    /// The latch makes the request idempotent: a second signal is drained like
+    /// the first and changes nothing. A read of zero means the pipe has no writer
+    /// left; the reactor keeps its own, so that answer only arises once the value
+    /// is being torn down, and the latch is set regardless.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServeError::Signal`] when reading the pipe fails.
+    fn absorb_shutdown(&mut self) -> Result<(), ServeError> {
+        let mut buffer = [0u8; SIGNAL_DRAIN_BYTES];
+        for _ in 0..SIGNAL_READS_PER_TURN {
+            match self.signals.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(ServeError::Signal(error.kind())),
+            }
+        }
+        self.shutting_down = true;
+        Ok(())
+    }
+
+    /// Queues the aggregate counter sample when it is due and the counters moved.
+    ///
+    /// The sample is due [`TICK_INTERVAL`] after the last one and immediately when
+    /// there is none, so the first request after startup is reported at once and
+    /// every later change waits for the interval. The snapshot advances with the
+    /// attempt rather than with the write, so a queue that refused the record
+    /// costs one retry per interval instead of a retry per turn.
+    fn tick(&mut self, store: &mut LogStore, filter: LogFilter, now: Instant) -> bool {
+        if self
+            .tick_deadline(now)
+            .is_none_or(|deadline| deadline > now)
+        {
+            return false;
+        }
+        let record = Record::Tick {
+            served: self.served,
+            rejected: self.rejected,
+            dropped: store.dropped(),
+        };
+        self.tick.last = Some(now);
+        match store.write(filter, record) {
+            WriteOutcome::Written => {
+                self.tick.served = self.served;
+                self.tick.rejected = self.rejected;
+                true
+            }
+            WriteOutcome::Filtered => {
+                self.tick.served = self.served;
+                self.tick.rejected = self.rejected;
+                false
+            }
+            WriteOutcome::Dropped => false,
+        }
     }
 
     /// Accepts pending connections up to the per-turn budget.
@@ -571,22 +911,66 @@ impl Reactor {
     /// Only an empty queue or an idle drain leaves the reactor without a log
     /// deadline.
     ///
-    /// The filter is the threshold for the lifecycle records this step will own;
-    /// the drain itself only moves queued bytes, so the value is carried unused.
+    /// A failed drain latches the sink: no drain is offered again before the
+    /// retry deadline, so a broken sink costs one attempt per second instead of
+    /// one per turn. The first failure of an episode queues one
+    /// [`Record::SinkFailure`], and a drain the sink takes clears the latch, which
+    /// makes the next failure a new episode.
     fn drain_logs(
         &mut self,
         store: &mut LogStore,
-        _filter: LogFilter,
+        filter: LogFilter,
         sink: &mut impl Write,
         now: Instant,
     ) -> bool {
-        let outcome = sink::drain(store, sink, DrainBudget::DEFAULT);
-        self.log_retry_at = match outcome {
-            DrainOutcome::Stalled | DrainOutcome::Failed { .. } => Some(now + LOG_RETRY),
-            DrainOutcome::Progress { .. } if !store.is_empty() => Some(now),
-            DrainOutcome::Idle | DrainOutcome::Progress { .. } => None,
-        };
-        matches!(outcome, DrainOutcome::Progress { .. })
+        if !self.drain_due(now) {
+            return false;
+        }
+        match sink::drain(store, sink, DrainBudget::DEFAULT) {
+            DrainOutcome::Failed { kind } => {
+                self.sink.failed = Some(kind);
+                self.sink.failures = self.sink.failures.saturating_add(1);
+                self.log_retry_at = Some(now + LOG_RETRY);
+                if !self.sink.recorded {
+                    self.sink.recorded = store.write(
+                        filter,
+                        Record::SinkFailure {
+                            failures: self.sink.failures,
+                        },
+                    ) != WriteOutcome::Dropped;
+                }
+                false
+            }
+            DrainOutcome::Stalled => {
+                self.log_retry_at = Some(now + LOG_RETRY);
+                false
+            }
+            DrainOutcome::Progress { .. } => {
+                self.recover_sink();
+                self.log_retry_at = (!store.is_empty()).then_some(now);
+                true
+            }
+            DrainOutcome::Idle => {
+                self.recover_sink();
+                self.log_retry_at = None;
+                false
+            }
+        }
+    }
+
+    /// Whether this turn may offer the queue to the sink.
+    ///
+    /// Only a latched failure suppresses a drain, and only until the retry
+    /// deadline that failure scheduled. A stalled sink is retried every turn and
+    /// kept from spinning by [`Reactor::next_deadline`].
+    fn drain_due(&self, now: Instant) -> bool {
+        self.sink.failed.is_none() || self.log_retry_at.is_none_or(|retry| now >= retry)
+    }
+
+    /// Clears the sink's failure latch after a drain the sink took.
+    fn recover_sink(&mut self) {
+        self.sink.failed = None;
+        self.sink.recorded = false;
     }
 
     /// Registers or deregisters the listener so `registered` holds afterwards.
@@ -643,21 +1027,25 @@ fn reply_bytes(plan: &ResponsePlan, pending: Pending) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACCEPT_PER_TURN, Reactor, ServeError, TOKEN_LISTENER, TOKEN_SIGNAL, TurnOutcome, TurnWait,
-        connection_slot, connection_token,
+        ACCEPT_PER_TURN, Reactor, ServeError, ShutdownSignals, TICK_INTERVAL, TOKEN_LISTENER,
+        TOKEN_SIGNAL, TurnOutcome, TurnWait, connection_slot, connection_token,
     };
     use crate::exit::ExitCode;
     use crate::http::ResponsePlan;
-    use crate::log::sink::{self, LOG_RETRY};
+    use crate::log::sink::{self, DrainOutcome, LOG_RETRY};
     use crate::log::{LogFilter, LogStore, Record, WriteOutcome};
     use crate::serve::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS};
     use mio::Token;
     use mio::net::TcpListener as MioListener;
+    use std::any::Any;
     use std::io::{self, ErrorKind, Read, Write};
     use std::net::{SocketAddr, TcpStream};
+    use std::panic::{self, AssertUnwindSafe};
     use std::time::{Duration, Instant};
 
-    const DRIVE_TURNS: usize = 1024;
+    const DRIVE_DEADLINE: Duration = Duration::from_secs(2);
+    const DRIVE_SLACK_TURNS: usize = 64;
+    const IDLE_SLEEP: Duration = Duration::from_millis(1);
 
     struct Harness {
         reactor: Reactor,
@@ -673,9 +1061,10 @@ mod tests {
             listener.set_nonblocking(true).unwrap();
             let address = listener.local_addr().unwrap();
             let listener = MioListener::from_std(listener);
+            let signals = ShutdownSignals::detached().unwrap();
             let plan = ResponsePlan::new(env!("CARGO_PKG_VERSION"));
             Self {
-                reactor: Reactor::new(listener, plan).unwrap(),
+                reactor: Reactor::new(listener, signals, plan).unwrap(),
                 store: LogStore::new().unwrap(),
                 sink: Vec::new(),
                 address,
@@ -702,13 +1091,43 @@ mod tests {
         where
             F: FnMut(&Self) -> bool,
         {
-            for _ in 0..DRIVE_TURNS {
+            let started = Instant::now();
+            let allowance = self.drive_allowance();
+            for turn in 0.. {
                 if done(self) {
                     return;
                 }
-                let _ = self.turn();
+                assert!(
+                    turn < allowance,
+                    "the reactor did not reach the expected state in {turn} turns: {}",
+                    self.state()
+                );
+                assert!(
+                    started.elapsed() <= DRIVE_DEADLINE,
+                    "the reactor did not reach the expected state within {DRIVE_DEADLINE:?}: {}",
+                    self.state()
+                );
+                if self.turn() == TurnOutcome::Idle {
+                    std::thread::sleep(IDLE_SLEEP);
+                }
             }
-            assert!(done(self), "the reactor did not reach the expected state");
+        }
+
+        fn drive_allowance(&self) -> usize {
+            let work = self.store.len().saturating_add(self.reactor.slots.len());
+            2usize
+                .saturating_mul(work)
+                .saturating_add(DRIVE_SLACK_TURNS)
+        }
+
+        fn state(&self) -> String {
+            format!(
+                "served={} rejected={} slots={} listener_registered={}",
+                self.reactor.served(),
+                self.reactor.rejected(),
+                self.reactor.slots.len(),
+                self.reactor.listener_registered
+            )
         }
 
         fn advance(&mut self, delta: Duration) {
@@ -756,6 +1175,34 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    struct FailingSink {
+        kind: ErrorKind,
+        calls: usize,
+    }
+
+    impl Write for FailingSink {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            self.calls += 1;
+            Err(io::Error::from(self.kind))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn panic_text(payload: &(dyn Any + Send)) -> String {
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| {
+                payload.downcast_ref::<&str>().map_or_else(
+                    || String::from("<unnamed panic>"),
+                    |text| (*text).to_owned(),
+                )
+            })
     }
 
     fn plan() -> ResponsePlan {
@@ -937,11 +1384,11 @@ mod tests {
         for _ in 0..ACCEPT_PER_TURN {
             clients.push(harness.connect());
         }
-        let _ = harness.turn();
+        harness.drive_until(|harness| !harness.reactor.slots.is_empty());
         let accepted = harness.reactor.slots.len();
         assert!(
             accepted > 1,
-            "one turn accepted {accepted} connection, so the batch stopped before the backlog drained"
+            "the first accepting turn took {accepted} of the {ACCEPT_PER_TURN} queued connections"
         );
         assert!(accepted <= ACCEPT_PER_TURN);
         harness.drive_until(|harness| harness.reactor.slots.len() == ACCEPT_PER_TURN);
@@ -1015,6 +1462,10 @@ mod tests {
         assert_eq!(
             remaining,
             queued - u64::try_from(sink::SINK_MAX_OPS).unwrap()
+        );
+        assert_eq!(
+            harness.reactor.next_deadline(harness.now),
+            Some(harness.now)
         );
         let lines = harness
             .sink
@@ -1119,5 +1570,198 @@ mod tests {
             harness.reactor.next_deadline(harness.now),
             Some(harness.now + LOG_RETRY)
         );
+    }
+
+    #[test]
+    fn a_signal_requests_shutdown_and_the_latch_absorbs_the_second() {
+        let mut harness = Harness::new();
+        let _client = harness.connect();
+        assert!(!harness.reactor.is_shutting_down());
+        harness.reactor.signals.trigger().unwrap();
+        assert_eq!(harness.turn(), TurnOutcome::ShuttingDown);
+        assert!(harness.reactor.is_shutting_down());
+        assert_eq!(harness.reactor.slots.len(), 0);
+        harness.reactor.signals.trigger().unwrap();
+        assert_eq!(harness.turn(), TurnOutcome::ShuttingDown);
+        assert_eq!(harness.reactor.served(), 0);
+        assert_eq!(harness.reactor.rejected(), 0);
+    }
+
+    #[test]
+    fn shutdown_flushes_one_shutdown_record_within_the_deadline() {
+        let mut harness = Harness::new();
+        harness.reactor.served = 3;
+        harness.reactor.rejected = 2;
+        assert_eq!(
+            harness
+                .store
+                .write(LogFilter::Info, Record::FilterDefaulted),
+            WriteOutcome::Written
+        );
+        harness.now = Instant::now();
+        let outcome = harness.reactor.shutdown(
+            &mut harness.store,
+            LogFilter::Info,
+            &mut harness.sink,
+            harness.now,
+        );
+        assert_eq!(outcome, DrainOutcome::Idle);
+        assert!(harness.store.is_empty());
+        assert_eq!(
+            harness.sink.as_slice(),
+            b"level=warn kind=filter_default\r\nlevel=info kind=shutdown served=3 rejected=2 dropped=0\r\n"
+        );
+    }
+
+    #[test]
+    fn the_tick_reports_once_per_interval_and_stops_when_idle() {
+        let mut harness = Harness::new();
+        assert_eq!(harness.reactor.next_deadline(harness.now), None);
+        harness.exchange(b"GET / HTTP/1.1\r\n\r\n");
+        assert_eq!(
+            harness.sink.as_slice(),
+            b"level=info kind=tick served=1 rejected=0 dropped=0\r\n"
+        );
+        let tick_at = harness.reactor.tick.last.unwrap();
+        assert_eq!(harness.reactor.next_deadline(harness.now), None);
+        harness.advance(TICK_INTERVAL / 2);
+        let received = harness.exchange_driven(b"GET / HTTP/1.1\r\n\r\n", |harness| {
+            harness.reactor.served() == 2 && harness.reactor.slots.is_empty()
+        });
+        assert_eq!(received, plan().ok_get());
+        assert_eq!(
+            harness.sink.as_slice(),
+            b"level=info kind=tick served=1 rejected=0 dropped=0\r\n"
+        );
+        assert_eq!(
+            harness.reactor.next_deadline(harness.now),
+            Some(tick_at + TICK_INTERVAL)
+        );
+        harness.advance(TICK_INTERVAL / 2);
+        assert_eq!(
+            harness.reactor.next_deadline(harness.now),
+            Some(harness.now)
+        );
+        assert_eq!(harness.turn(), TurnOutcome::Progress);
+        assert_eq!(
+            harness.sink.as_slice(),
+            b"level=info kind=tick served=1 rejected=0 dropped=0\r\nlevel=info kind=tick served=2 rejected=0 dropped=0\r\n"
+        );
+        assert_eq!(harness.reactor.next_deadline(harness.now), None);
+        assert_eq!(harness.turn(), TurnOutcome::Idle);
+        assert_eq!(
+            harness.sink.as_slice(),
+            b"level=info kind=tick served=1 rejected=0 dropped=0\r\nlevel=info kind=tick served=2 rejected=0 dropped=0\r\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_drain_is_latched_and_reported_once_per_episode() {
+        let mut harness = Harness::new();
+        assert_eq!(
+            harness
+                .store
+                .write(LogFilter::Info, Record::FilterDefaulted),
+            WriteOutcome::Written
+        );
+        let mut sink = FailingSink {
+            kind: ErrorKind::BrokenPipe,
+            calls: 0,
+        };
+        let failed_at = harness.now;
+        harness
+            .reactor
+            .wait(failed_at, TurnWait::Immediate)
+            .unwrap();
+        assert_eq!(
+            harness
+                .reactor
+                .turn(&mut harness.store, LogFilter::Info, &mut sink, failed_at)
+                .unwrap(),
+            TurnOutcome::Idle
+        );
+        assert_eq!(sink.calls, 1);
+        assert_eq!(harness.store.len(), 2);
+        assert_eq!(harness.reactor.sink.failed, Some(ErrorKind::BrokenPipe));
+        assert_eq!(
+            harness.reactor.next_deadline(failed_at),
+            Some(failed_at + LOG_RETRY)
+        );
+        harness.advance(LOG_RETRY / 2);
+        harness
+            .reactor
+            .wait(harness.now, TurnWait::Immediate)
+            .unwrap();
+        assert_eq!(
+            harness
+                .reactor
+                .turn(&mut harness.store, LogFilter::Info, &mut sink, harness.now)
+                .unwrap(),
+            TurnOutcome::Idle
+        );
+        assert_eq!(sink.calls, 1);
+        harness.advance(LOG_RETRY / 2);
+        harness
+            .reactor
+            .wait(harness.now, TurnWait::Immediate)
+            .unwrap();
+        assert_eq!(
+            harness
+                .reactor
+                .turn(&mut harness.store, LogFilter::Info, &mut sink, harness.now)
+                .unwrap(),
+            TurnOutcome::Idle
+        );
+        assert_eq!(sink.calls, 2);
+        assert_eq!(harness.store.len(), 2);
+        assert_eq!(harness.reactor.sink.failures, 2);
+        let mut recovered = Vec::new();
+        harness.advance(LOG_RETRY);
+        harness
+            .reactor
+            .wait(harness.now, TurnWait::Immediate)
+            .unwrap();
+        assert_eq!(
+            harness
+                .reactor
+                .turn(
+                    &mut harness.store,
+                    LogFilter::Info,
+                    &mut recovered,
+                    harness.now
+                )
+                .unwrap(),
+            TurnOutcome::Progress
+        );
+        assert!(harness.store.is_empty());
+        assert!(harness.reactor.sink.failed.is_none());
+        assert!(!harness.reactor.sink.recorded);
+        assert_eq!(harness.reactor.next_deadline(harness.now), None);
+        assert_eq!(
+            recovered.as_slice(),
+            b"level=warn kind=filter_default\r\nlevel=warn kind=sink_failure failures=1\r\n"
+        );
+    }
+
+    #[test]
+    fn a_starved_harness_fails_in_bounded_time_with_its_state() {
+        let mut harness = Harness::new();
+        let started = Instant::now();
+        let caught = panic::catch_unwind(AssertUnwindSafe(|| {
+            harness.drive_until(|harness| harness.reactor.served() == u64::MAX);
+        }));
+        let message = panic_text(caught.expect_err("the starved drive must give up").as_ref());
+        assert!(started.elapsed() < DRIVE_DEADLINE);
+        for field in [
+            "served=0",
+            "rejected=0",
+            "slots=0",
+            "listener_registered=true",
+        ] {
+            assert!(
+                message.contains(field),
+                "diagnostics {message:?} lack {field}"
+            );
+        }
     }
 }

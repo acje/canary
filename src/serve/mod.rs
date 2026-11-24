@@ -6,16 +6,19 @@
 //! only; rendered reply bytes stay owned by the reactor's reply plan, so a slot
 //! never holds a reply buffer of its own.
 //!
-//! [`reactor::Reactor`] owns the listening socket, the slot table, and the
-//! poller. A turn is [`reactor::Reactor::wait`] — the poll that snapshots the
-//! readiness — followed by [`reactor::Reactor::turn`] — a fixed set of bounded
-//! steps dated by the instant the caller samples after the wait returns — so no
-//! turn can block on a socket or on the log sink.
+//! [`reactor::Reactor`] owns the listening socket, the slot table, the shutdown
+//! self-pipe, and the poller. A turn is [`reactor::Reactor::wait`] — the poll
+//! that snapshots the readiness — followed by [`reactor::Reactor::turn`] — a
+//! fixed set of bounded steps dated by the instant the caller samples after the
+//! wait returns — so no turn can block on a socket, on the signal pipe, or on
+//! the log sink. [`reactor::ShutdownSignals`] owns the pipe: its installed form
+//! is the reactor's only path from a `SIGTERM` or `SIGINT` to shutdown, and its
+//! detached form keeps process handlers out of a test.
 
 pub mod reactor;
 pub mod slots;
 
-pub use reactor::{Reactor, ServeError, TurnOutcome, TurnWait};
+pub use reactor::{Reactor, ServeError, ShutdownSignals, TurnOutcome, TurnWait};
 pub use slots::{Pending, Phase, ReadOutcome, Slots, WriteProgress};
 
 use std::time::Duration;
