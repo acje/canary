@@ -680,11 +680,16 @@ impl Reactor {
                 Err(error) => return Err(ServeError::Accept(error.kind())),
             }
         }
-        if stop == AcceptStop::Capacity {
-            self.set_listener_registered(false)?;
-        }
-        self.accept_backlog = !matches!(stop, AcceptStop::BacklogEmpty | AcceptStop::Capacity);
-        Ok(progress || stop == AcceptStop::Capacity)
+        let (capacity, backlog) = match stop {
+            AcceptStop::BacklogEmpty => (false, false),
+            AcceptStop::Capacity => {
+                self.set_listener_registered(false)?;
+                (true, false)
+            }
+            AcceptStop::Budget => (false, true),
+        };
+        self.accept_backlog = backlog;
+        Ok(progress || capacity)
     }
 
     /// Visits the connection in `index` once, following its current phase.
