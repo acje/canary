@@ -1,7 +1,7 @@
 //! Bounded log queue for the single-owner reactor.
 //!
 //! Storage is a ring of [`QUEUE_SLOTS`] fixed [`SLOT_BYTES`] slots reserved once
-//! by [`LogStore::new`]. A record is rendered into one slot before the queue is
+//! by [`LogQueue::new`]. A record is rendered into one slot before the queue is
 //! touched, so a record either occupies a whole slot or is dropped; a dropped
 //! record never leaves a partial line behind.
 //!
@@ -276,7 +276,7 @@ impl Record {
     }
 }
 
-/// The outcome of one [`LogStore::write`] call.
+/// The outcome of one [`LogQueue::write`] call.
 #[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WriteOutcome {
@@ -290,7 +290,7 @@ pub enum WriteOutcome {
     Dropped,
 }
 
-/// The outcome of one [`LogStore::consume_front`] call.
+/// The outcome of one [`LogQueue::consume_front`] call.
 #[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConsumeOutcome {
@@ -302,14 +302,14 @@ pub enum ConsumeOutcome {
     Rejected,
 }
 
-/// Why a [`LogStore`] could not be constructed.
+/// Why a [`LogQueue`] could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LogStoreError {
+pub enum LogQueueError {
     /// The fixed queue buffer could not be reserved during startup.
     Reserve,
 }
 
-impl fmt::Display for LogStoreError {
+impl fmt::Display for LogQueueError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::Reserve => "the fixed log queue buffer could not be reserved",
@@ -318,14 +318,14 @@ impl fmt::Display for LogStoreError {
     }
 }
 
-impl std::error::Error for LogStoreError {}
+impl std::error::Error for LogQueueError {}
 
 /// A fixed-capacity log queue with a durable partial-consume cursor.
 ///
 /// The ring holds at most [`QUEUE_SLOTS`] records of at most [`SLOT_BYTES`] bytes
-/// each. The byte buffer is reserved once by [`LogStore::new`] and never grows;
-/// [`LogStore::write`] rejects a record rather than allocate.
-pub struct LogStore {
+/// each. The byte buffer is reserved once by [`LogQueue::new`] and never grows;
+/// [`LogQueue::write`] rejects a record rather than allocate.
+pub struct LogQueue {
     bytes: Vec<u8>,
     lengths: [usize; QUEUE_SLOTS],
     head: usize,
@@ -334,18 +334,18 @@ pub struct LogStore {
     dropped: u64,
 }
 
-impl LogStore {
+impl LogQueue {
     /// Reserves the fixed queue buffer.
     ///
     /// # Errors
     ///
-    /// Returns [`LogStoreError::Reserve`] when the operating system cannot
+    /// Returns [`LogQueueError::Reserve`] when the operating system cannot
     /// provide [`QUEUE_BYTES`] bytes at startup.
-    pub fn new() -> Result<Self, LogStoreError> {
+    pub fn new() -> Result<Self, LogQueueError> {
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(QUEUE_BYTES)
-            .map_err(|_| LogStoreError::Reserve)?;
+            .map_err(|_| LogQueueError::Reserve)?;
         bytes.resize(QUEUE_BYTES, 0);
         Ok(Self {
             bytes,
@@ -361,7 +361,7 @@ impl LogStore {
     ///
     /// A [`WriteOutcome::Filtered`] result leaves both the queue and the drop
     /// counter untouched. A [`WriteOutcome::Dropped`] result leaves the queue
-    /// untouched and advances [`LogStore::dropped`] by one.
+    /// untouched and advances [`LogQueue::dropped`] by one.
     pub fn write(&mut self, filter: LogFilter, record: Record) -> WriteOutcome {
         if !filter.allows(record.level()) {
             return WriteOutcome::Filtered;
@@ -489,21 +489,21 @@ impl fmt::Write for Slot {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConsumeOutcome, Level, LogFilter, LogStore, LogStoreError, MAX_SINK_FAILURE_BYTES,
+        ConsumeOutcome, Level, LogFilter, LogQueue, LogQueueError, MAX_SINK_FAILURE_BYTES,
         QUEUE_BYTES, QUEUE_SLOTS, Record, SLOT_BYTES, Slot, WriteOutcome,
     };
     use std::fmt::Write as _;
     use std::net::SocketAddr;
 
-    fn store() -> LogStore {
-        LogStore::new().unwrap()
+    fn store() -> LogQueue {
+        LogQueue::new().unwrap()
     }
 
     fn address(raw: &str) -> SocketAddr {
         raw.parse().unwrap()
     }
 
-    fn front(store: &LogStore) -> Vec<u8> {
+    fn front(store: &LogQueue) -> Vec<u8> {
         store.unwritten_front().unwrap().to_vec()
     }
 
@@ -1007,7 +1007,7 @@ mod tests {
     #[test]
     fn error_names_the_reservation_failure() {
         assert_eq!(
-            LogStoreError::Reserve.to_string(),
+            LogQueueError::Reserve.to_string(),
             "the fixed log queue buffer could not be reserved"
         );
     }

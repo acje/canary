@@ -1,4 +1,4 @@
-//! The bounded nonblocking stdout sink for [`LogStore`].
+//! The bounded nonblocking stdout sink for [`LogQueue`].
 //!
 //! A turn of the reactor calls [`drain`] with a [`DrainBudget`]; the sink never
 //! blocks, never allocates, and never grows. Whatever the operating system
@@ -20,7 +20,7 @@ use std::mem::ManuallyDrop;
 use std::os::fd::FromRawFd;
 use std::time::{Duration, Instant};
 
-use super::{ConsumeOutcome, LogStore};
+use super::{ConsumeOutcome, LogQueue};
 
 /// The most write attempts one [`drain`] turn makes.
 ///
@@ -60,7 +60,7 @@ pub const LOG_RETRY: Duration = Duration::from_secs(1);
 /// reader that is still consuming and short enough that startup and shutdown
 /// stay responsive. Exhaustion: the drain stops at the deadline and the
 /// remainder stays queued; at startup the serving turns offer it again, and at
-/// shutdown it is abandoned with the process. [`LogStore::dropped`] counts
+/// shutdown it is abandoned with the process. [`LogQueue::dropped`] counts
 /// queue refusals only, so a leftover record never advances it. The returned
 /// [`DrainOutcome`] reports the short flush. Evidence:
 /// `drain_until_with_an_elapsed_deadline_performs_exactly_one_drain`.
@@ -113,7 +113,7 @@ impl DrainBudget {
 
 /// Offers queued records to `sink` for at most `budget` work.
 ///
-/// The turn re-reads [`LogStore::unwritten_front`] before every attempt and
+/// The turn re-reads [`LogQueue::unwritten_front`] before every attempt and
 /// offers the front record once, so a short write resumes where it stopped.
 /// [`DrainOutcome::Progress`] counts what the store actually released, never
 /// what the sink was offered. Bytes a turn released before a full sink refused
@@ -128,7 +128,7 @@ impl DrainBudget {
 /// The `accepted > offered` check below is the only place this sink enforces the
 /// [`std::io::Write`] contract, so a sink that reports bytes it never accepted
 /// fails the turn instead of silently releasing queue bytes.
-pub fn drain(store: &mut LogStore, sink: &mut impl Write, budget: DrainBudget) -> DrainOutcome {
+pub fn drain(store: &mut LogQueue, sink: &mut impl Write, budget: DrainBudget) -> DrainOutcome {
     let mut records: usize = 0;
     let mut bytes: usize = 0;
     let mut ops: usize = 0;
@@ -186,7 +186,7 @@ pub fn drain(store: &mut LogStore, sink: &mut impl Write, budget: DrainBudget) -
 /// The first turn always runs, so an already-elapsed deadline still performs
 /// exactly one bounded drain and returns its outcome.
 pub fn drain_until(
-    store: &mut LogStore,
+    store: &mut LogQueue,
     sink: &mut impl Write,
     budget: DrainBudget,
     deadline: Instant,
@@ -268,7 +268,7 @@ mod tests {
         DrainBudget, DrainOutcome, FLUSH_DRAIN, NonblockingStdout, SINK_MAX_BYTES, SINK_MAX_OPS,
         drain, drain_until,
     };
-    use crate::log::{LogFilter, LogStore, Record, WriteOutcome};
+    use crate::log::{LogFilter, LogQueue, Record, WriteOutcome};
     use std::collections::VecDeque;
     use std::fs::File;
     use std::io::{self, ErrorKind, Read, Write};
@@ -349,8 +349,8 @@ mod tests {
         }
     }
 
-    fn store_with(records: u64) -> LogStore {
-        let mut store = LogStore::new().unwrap();
+    fn store_with(records: u64) -> LogQueue {
+        let mut store = LogQueue::new().unwrap();
         for served in 0..records {
             let record = Record::Tick {
                 served,
@@ -362,7 +362,7 @@ mod tests {
         store
     }
 
-    fn front_len(store: &LogStore) -> usize {
+    fn front_len(store: &LogQueue) -> usize {
         store.unwritten_front().unwrap().len()
     }
 

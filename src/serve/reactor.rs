@@ -38,7 +38,7 @@ use signal_hook::low_level::pipe as signal_pipe;
 
 use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, ParseOutcome, Reply, ResponsePlan};
 use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DRAIN, LOG_RETRY};
-use crate::log::{LogFilter, LogStore, Record, WriteOutcome};
+use crate::log::{LogFilter, LogQueue, Record, WriteOutcome};
 
 use super::slots::{Pending, Phase, Slots, WriteProgress};
 use super::{HEAD_BYTES, MAX_CONNECTIONS};
@@ -587,7 +587,7 @@ impl Reactor {
     /// slot until the process exits.
     pub fn turn(
         &mut self,
-        store: &mut LogStore,
+        store: &mut LogQueue,
         filter: LogFilter,
         sink: &mut impl Write,
         now: Instant,
@@ -645,7 +645,7 @@ impl Reactor {
     /// line was queued and why the flush ended short.
     pub fn shutdown(
         &mut self,
-        store: &mut LogStore,
+        store: &mut LogQueue,
         filter: LogFilter,
         sink: &mut impl Write,
         now: Instant,
@@ -695,7 +695,7 @@ impl Reactor {
     /// every later change waits for the interval. The snapshot advances with the
     /// attempt rather than with the write, so a queue that refused the record
     /// costs one retry per interval instead of a retry per turn.
-    fn tick(&mut self, store: &mut LogStore, filter: LogFilter, now: Instant) -> bool {
+    fn tick(&mut self, store: &mut LogQueue, filter: LogFilter, now: Instant) -> bool {
         if self
             .tick_deadline(now)
             .is_none_or(|deadline| deadline > now)
@@ -972,7 +972,7 @@ impl Reactor {
     /// episode.
     fn drain_logs(
         &mut self,
-        store: &mut LogStore,
+        store: &mut LogQueue,
         filter: LogFilter,
         sink: &mut impl Write,
         now: Instant,
@@ -1086,7 +1086,7 @@ mod tests {
     };
     use crate::http::ResponsePlan;
     use crate::log::sink::{self, DrainOutcome, LOG_RETRY};
-    use crate::log::{LogFilter, LogStore, QUEUE_SLOTS, Record, WriteOutcome};
+    use crate::log::{LogFilter, LogQueue, QUEUE_SLOTS, Record, WriteOutcome};
     use crate::serve::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS};
     use mio::Token;
     use mio::net::TcpListener as MioListener;
@@ -1102,7 +1102,7 @@ mod tests {
 
     struct Harness {
         reactor: Reactor,
-        store: LogStore,
+        store: LogQueue,
         sink: Vec<u8>,
         address: SocketAddr,
         now: Instant,
@@ -1118,7 +1118,7 @@ mod tests {
             let plan = ResponsePlan::new(env!("CARGO_PKG_VERSION"));
             Self {
                 reactor: Reactor::new(listener, signals, plan).unwrap(),
-                store: LogStore::new().unwrap(),
+                store: LogQueue::new().unwrap(),
                 sink: Vec::new(),
                 address,
                 now: Instant::now(),

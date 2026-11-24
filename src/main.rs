@@ -15,7 +15,7 @@ use canary::config::RuntimePlan;
 use canary::exit::ExitCode;
 use canary::http::ResponsePlan;
 use canary::log::sink::{self, DrainBudget, FLUSH_DRAIN, NonblockingStdout};
-use canary::log::{LogStore, Record, WriteOutcome};
+use canary::log::{LogQueue, Record, WriteOutcome};
 use canary::probe::{self, Invocation, ProbeOutcome};
 use canary::serve::{Reactor, ShutdownReport, ShutdownSignals, TurnOutcome, TurnWait};
 
@@ -72,7 +72,7 @@ fn run() -> ExitCode {
         }
     };
 
-    let mut store = match LogStore::new() {
+    let mut store = match LogQueue::new() {
         Ok(store) => store,
         Err(error) => {
             return failed(
@@ -164,7 +164,7 @@ fn run() -> ExitCode {
 /// [`WriteOutcome::Written`] or [`WriteOutcome::Filtered`] record over an empty
 /// queue lost nothing: the filter is the operator's own choice, and an empty
 /// queue means every queued record reached the sink.
-fn shutdown_flush_incomplete(report: &ShutdownReport, store: &LogStore) -> bool {
+fn shutdown_flush_incomplete(report: &ShutdownReport, store: &LogQueue) -> bool {
     matches!(report.record, WriteOutcome::Dropped) || !store.is_empty()
 }
 
@@ -190,7 +190,7 @@ fn failed(message: impl fmt::Display, code: ExitCode) -> ExitCode {
 mod tests {
     use super::shutdown_flush_incomplete;
     use canary::log::sink::DrainOutcome;
-    use canary::log::{LogFilter, LogStore, Record, WriteOutcome};
+    use canary::log::{LogFilter, LogQueue, Record, WriteOutcome};
     use canary::serve::ShutdownReport;
 
     fn report(record: WriteOutcome) -> ShutdownReport {
@@ -200,8 +200,8 @@ mod tests {
         }
     }
 
-    fn store_with_one_record() -> LogStore {
-        let mut store = LogStore::new().unwrap();
+    fn store_with_one_record() -> LogQueue {
+        let mut store = LogQueue::new().unwrap();
         let record = Record::Tick {
             served: 0,
             rejected: 0,
@@ -215,7 +215,7 @@ mod tests {
     fn a_written_record_over_an_empty_queue_is_a_complete_flush() {
         assert!(!shutdown_flush_incomplete(
             &report(WriteOutcome::Written),
-            &LogStore::new().unwrap()
+            &LogQueue::new().unwrap()
         ));
     }
 
@@ -223,7 +223,7 @@ mod tests {
     fn a_filtered_record_over_an_empty_queue_is_a_complete_flush() {
         assert!(!shutdown_flush_incomplete(
             &report(WriteOutcome::Filtered),
-            &LogStore::new().unwrap()
+            &LogQueue::new().unwrap()
         ));
     }
 
@@ -231,7 +231,7 @@ mod tests {
     fn a_dropped_record_is_an_incomplete_flush() {
         assert!(shutdown_flush_incomplete(
             &report(WriteOutcome::Dropped),
-            &LogStore::new().unwrap()
+            &LogQueue::new().unwrap()
         ));
     }
 
