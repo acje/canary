@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_byte_accept_is_stalled_and_never_progress() {
+    fn zero_byte_accept_is_stalled_and_moves_nothing() {
         let mut store = store_with(1);
         let record_len = front_len(&store);
         let mut sink = FakeWriter::new([Step::Accepted(0)]);
@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_pipe_after_a_whole_record_reports_progress_then_stalls() {
+    fn a_full_pipe_after_a_whole_record_reports_moved_then_stalls() {
         let mut store = store_with(2);
         let record_len = front_len(&store);
         let mut sink = FakeWriter::new([
@@ -622,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_until_terminates_against_a_progressing_sink() {
+    fn drain_until_terminates_against_a_sink_that_keeps_accepting() {
         let mut store = store_with(3);
         let record_len = front_len(&store);
         let queued = store.len();

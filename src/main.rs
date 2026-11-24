@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn a_written_record_over_an_empty_queue_is_a_complete_flush() {
+    fn a_queued_record_over_an_empty_queue_is_a_complete_flush() {
         assert!(!shutdown_flush_incomplete(
             &report(QueueOutcome::Queued),
             &LogQueue::new().unwrap()

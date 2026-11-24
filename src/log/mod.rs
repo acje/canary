@@ -991,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn store_reserves_the_full_ring_once() {
+    fn queue_reserves_the_full_ring_once() {
         let store = store();
         assert!(store.bytes.capacity() >= QUEUE_BYTES);
         assert_eq!(store.bytes.len(), QUEUE_BYTES);
@@ -1001,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn store_capacity_does_not_grow_when_the_queue_fills() {
+    fn queue_capacity_does_not_grow_when_the_queue_fills() {
         let mut store = store();
         let reserved = store.bytes.capacity();
         let slots = u64::try_from(QUEUE_SLOTS).unwrap();
