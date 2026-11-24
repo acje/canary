@@ -1,0 +1,127 @@
+//! The validated runtime plan assembled once from the only two external inputs.
+
+use std::fmt;
+
+use crate::log::{LogFilter, Record};
+use crate::port::{ListenPort, PortError};
+
+/// The configuration the process needs before it binds a listener.
+///
+/// `PORT` is the only fatal input: [`ListenPort::from_env`] rejects a missing,
+/// non-numeric, or out-of-range value with [`ConfigError::Port`]. `RUST_LOG` is
+/// bounded and non-fatal: [`LogFilter::parse`] recognises exactly `off`, `error`,
+/// `warn`, and `info`, and defaults every other value to [`LogFilter::Info`]
+/// together with [`Record::FilterDefaulted`], which the plan carries as its
+/// [`RuntimePlan::notice`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimePlan {
+    /// The port to bind, where zero asks the operating system for one.
+    pub listen: ListenPort,
+    /// The severity filter every record is written through.
+    pub filter: LogFilter,
+    /// The record the filter choice requires, present only when `RUST_LOG`
+    /// defaulted.
+    pub notice: Option<Record>,
+}
+
+impl RuntimePlan {
+    /// Reads `PORT` and `RUST_LOG` once each and validates them together.
+    ///
+    /// These are the only external inputs of the process: `PORT` is fatal and
+    /// `RUST_LOG` is bounded and non-fatal, so a rejected filter never stops the
+    /// service and a missing or malformed port always does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Port`] when `PORT` is absent, not valid Unicode
+    /// text, or not a decimal value in `0..=65535`.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_inputs(
+            ListenPort::from_env(),
+            std::env::var("RUST_LOG").ok().as_deref(),
+        )
+    }
+
+    /// Pairs the port decision with the filter decision and its notice.
+    fn from_inputs(
+        listen: Result<ListenPort, PortError>,
+        rust_log: Option<&str>,
+    ) -> Result<Self, ConfigError> {
+        let listen = listen.map_err(ConfigError::Port)?;
+        let (filter, notice) = LogFilter::parse(rust_log).into_filter_and_notice();
+        Ok(Self {
+            listen,
+            filter,
+            notice,
+        })
+    }
+}
+
+/// Why the runtime plan could not be assembled.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigError {
+    /// The fatal `PORT` input was absent or rejected.
+    Port(PortError),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Port(error) => write!(formatter, "PORT: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConfigError, RuntimePlan};
+    use crate::log::{LogFilter, Record};
+    use crate::port::{ListenPort, Port, PortError};
+
+    #[test]
+    fn absent_rust_log_defaults_the_filter_and_carries_the_notice() {
+        let plan = RuntimePlan::from_inputs(Ok(ListenPort::Ephemeral), None).unwrap();
+        assert_eq!(plan.listen, ListenPort::Ephemeral);
+        assert_eq!(plan.filter, LogFilter::Info);
+        assert_eq!(plan.notice, Some(Record::FilterDefaulted));
+    }
+
+    #[test]
+    fn accepted_filter_yields_no_notice() {
+        let plan = RuntimePlan::from_inputs(Ok(ListenPort::Ephemeral), Some("off")).unwrap();
+        assert_eq!(plan.listen, ListenPort::Ephemeral);
+        assert_eq!(plan.filter, LogFilter::Off);
+        assert_eq!(plan.notice, None);
+    }
+
+    #[test]
+    fn rejected_port_is_the_only_plan_error() {
+        assert_eq!(
+            RuntimePlan::from_inputs(Err(PortError::Missing), Some("info")),
+            Err(ConfigError::Port(PortError::Missing))
+        );
+    }
+
+    #[test]
+    fn fixed_port_and_filter_travel_into_the_plan() {
+        let plan = RuntimePlan::from_inputs(
+            Ok(ListenPort::Fixed(Port::parse("8080").unwrap())),
+            Some("warn"),
+        )
+        .unwrap();
+        assert_eq!(plan.listen.port(), 8080);
+        assert_eq!(plan.filter, LogFilter::Warn);
+        assert_eq!(plan.notice, None);
+    }
+
+    #[test]
+    fn config_error_names_the_port_rejection() {
+        let error = ConfigError::Port(PortError::OutOfRange);
+        assert_eq!(
+            error.to_string(),
+            "PORT: PORT must be 1..=65535, or 0 for an ephemeral port"
+        );
+    }
+}

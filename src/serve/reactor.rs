@@ -508,6 +508,10 @@ impl Reactor {
     /// replaces it: a second wait before the turn discards the tokens the first
     /// collected.
     ///
+    /// A poll the platform reports as interrupted is retried, because the
+    /// shutdown handler this reactor installs is itself a signal handler: the
+    /// byte it writes makes the retried poll return at once with the signal token.
+    ///
     /// `now` dates the wait only. A caller samples that instant before this
     /// call and samples a fresh one for [`Reactor::turn`] after it returns, so
     /// the work is never dated by an instant the wait invalidated.
@@ -522,9 +526,13 @@ impl Reactor {
                 .next_deadline(now)
                 .map(|deadline| deadline.saturating_duration_since(now)),
         };
-        self.poll
-            .poll(&mut self.events, timeout)
-            .map_err(|error| ServeError::Poll(error.kind()))?;
+        loop {
+            match self.poll.poll(&mut self.events, timeout) {
+                Ok(()) => break,
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) => return Err(ServeError::Poll(error.kind())),
+            }
+        }
         let mut count = 0;
         for (snapshot, event) in self.tokens.iter_mut().zip(self.events.iter()) {
             *snapshot = event.token();
