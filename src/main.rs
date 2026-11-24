@@ -1,6 +1,8 @@
 //! The canary process: bind the liveness listener, serve one bounded reactor
 //! turn at a time, and exit through the closed [`ExitCode`] contract.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
@@ -11,9 +13,9 @@ use mio::net::TcpListener;
 use canary::config::RuntimePlan;
 use canary::exit::ExitCode;
 use canary::http::ResponsePlan;
-use canary::log::sink::{self, DrainBudget, DrainOutcome, NonblockingStdout, SHUTDOWN_DRAIN};
+use canary::log::sink::{self, DrainBudget, FLUSH_DRAIN, NonblockingStdout};
 use canary::log::{LogStore, Record, WriteOutcome};
-use canary::serve::{Reactor, ShutdownSignals, TurnOutcome, TurnWait};
+use canary::serve::{Reactor, ShutdownReport, ShutdownSignals, TurnOutcome, TurnWait};
 
 /// Serves the liveness probe until a shutdown signal and exits with the
 /// [`ExitCode`] of the outcome.
@@ -89,7 +91,7 @@ fn run() -> ExitCode {
         &mut store,
         &mut sink,
         DrainBudget::DEFAULT,
-        Instant::now() + SHUTDOWN_DRAIN,
+        Instant::now() + FLUSH_DRAIN,
     );
     if let Some(notice) = plan.notice {
         let _ = store.write(plan.filter, notice);
@@ -118,13 +120,26 @@ fn run() -> ExitCode {
     }
 
     let report = reactor.shutdown(&mut store, plan.filter, &mut sink, Instant::now());
-    if report.record != WriteOutcome::Written || report.drain != DrainOutcome::Idle {
+    if shutdown_flush_incomplete(&report, &store) {
         eprintln!(
-            "canary: shutdown flush incomplete: record={:?} drain={:?}",
-            report.record, report.drain
+            "canary: shutdown flush incomplete: record={:?} drain={:?} leftover={}",
+            report.record,
+            report.drain,
+            store.len()
         );
     }
     ExitCode::Ok
+}
+
+/// Whether the final flush lost a record rather than merely filtered one.
+///
+/// The flush is incomplete when the final [`Record::Shutdown`] was
+/// [`WriteOutcome::Dropped`], or when the bounded drain left records queued. A
+/// [`WriteOutcome::Written`] or [`WriteOutcome::Filtered`] record over an empty
+/// queue lost nothing: the filter is the operator's own choice, and an empty
+/// queue means every queued record reached the sink.
+fn shutdown_flush_incomplete(report: &ShutdownReport, store: &LogStore) -> bool {
+    matches!(report.record, WriteOutcome::Dropped) || !store.is_empty()
 }
 
 /// Binds `address` as a nonblocking listener the reactor can own.
@@ -143,4 +158,64 @@ fn bind_listener(address: SocketAddr) -> io::Result<TcpListener> {
 fn failed(message: impl fmt::Display, code: ExitCode) -> ExitCode {
     eprintln!("canary: {message}");
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shutdown_flush_incomplete;
+    use canary::log::sink::DrainOutcome;
+    use canary::log::{LogFilter, LogStore, Record, WriteOutcome};
+    use canary::serve::ShutdownReport;
+
+    fn report(record: WriteOutcome) -> ShutdownReport {
+        ShutdownReport {
+            record,
+            drain: DrainOutcome::Idle,
+        }
+    }
+
+    fn store_with_one_record() -> LogStore {
+        let mut store = LogStore::new().unwrap();
+        let record = Record::Tick {
+            served: 0,
+            rejected: 0,
+            dropped: 0,
+        };
+        assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+        store
+    }
+
+    #[test]
+    fn a_written_record_over_an_empty_queue_is_a_complete_flush() {
+        assert!(!shutdown_flush_incomplete(
+            &report(WriteOutcome::Written),
+            &LogStore::new().unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_filtered_record_over_an_empty_queue_is_a_complete_flush() {
+        assert!(!shutdown_flush_incomplete(
+            &report(WriteOutcome::Filtered),
+            &LogStore::new().unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_dropped_record_is_an_incomplete_flush() {
+        assert!(shutdown_flush_incomplete(
+            &report(WriteOutcome::Dropped),
+            &LogStore::new().unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_record_left_queued_is_an_incomplete_flush() {
+        for record in [WriteOutcome::Written, WriteOutcome::Filtered] {
+            assert!(
+                shutdown_flush_incomplete(&report(record), &store_with_one_record()),
+                "record {record:?}"
+            );
+        }
+    }
 }

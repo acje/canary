@@ -20,9 +20,11 @@
 //! line break. The grammar therefore needs no escaping.
 //!
 //! [`LogFilter::allows`] is the only filter decision. Startup, tick, and
-//! shutdown records are [`Level::Info`]; the filter-defaulted notice is
+//! shutdown records are [`Level::Info`]; the unrecognised-value notice is
 //! [`Level::Warn`]; the sink-failure notice is [`Level::Error`], so an operator
-//! who sets `RUST_LOG=error` still learns that external diagnostics are lost.
+//! who sets `RUST_LOG=error` still learns that external diagnostics are lost. An
+//! absent `RUST_LOG` defaults the filter to [`LogFilter::Info`] and records
+//! nothing, because that is the normal boot.
 //! Records leave the queue through [`sink::drain`], which never blocks and never
 //! allocates.
 
@@ -127,13 +129,14 @@ impl LogFilter {
     /// unset.
     ///
     /// Exactly `off`, `error`, `warn`, and `info` are recognised, compared
-    /// ASCII-case-insensitively after trimming surrounding ASCII whitespace.
-    /// Every other value, including the empty string and comma-separated
-    /// directive lists, yields [`FilterParse::Defaulted`].
+    /// ASCII-case-insensitively after trimming surrounding ASCII whitespace. An
+    /// unset variable yields [`FilterParseKind::Absent`]. Any supplied value that
+    /// does not name a severity, including the empty string and comma-separated
+    /// directive lists, yields [`FilterParseKind::Unrecognized`].
     #[must_use]
     pub fn parse(raw: Option<&str>) -> FilterParse {
         let Some(raw) = raw else {
-            return FilterParse(FilterParseKind::Defaulted);
+            return FilterParse(FilterParseKind::Absent);
         };
         let value = raw.trim_matches(|character: char| character.is_ascii_whitespace());
         if value.eq_ignore_ascii_case("off") {
@@ -145,7 +148,7 @@ impl LogFilter {
         } else if value.eq_ignore_ascii_case("info") {
             FilterParse(FilterParseKind::Accepted(Self::Info))
         } else {
-            FilterParse(FilterParseKind::Defaulted)
+            FilterParse(FilterParseKind::Unrecognized)
         }
     }
 
@@ -164,29 +167,33 @@ impl LogFilter {
 /// The outcome of interpreting a raw `RUST_LOG` value.
 ///
 /// The interpretation behind this value is private: the only way to obtain a
-/// filter is [`FilterParse::into_filter_and_notice`], so a defaulted filter
-/// cannot be applied without also recording its notice.
+/// filter is [`FilterParse::into_filter_and_notice`], so a filter chosen from an
+/// unrecognised value cannot be applied without also recording its notice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FilterParse(FilterParseKind);
 
 /// The private interpretation behind [`FilterParse`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FilterParseKind {
+    Absent,
     Accepted(LogFilter),
-    Defaulted,
+    Unrecognized,
 }
 
 impl FilterParse {
     /// The filter to apply and the notice the caller must record with it.
     ///
-    /// An accepted value yields its filter and no notice. A defaulted value
+    /// An absent variable yields [`LogFilter::Info`] with no notice, because an
+    /// absent variable is the normal boot and implies no degradation. An accepted
+    /// value yields its filter and no notice. A supplied but unrecognised value
     /// yields [`LogFilter::Info`] together with [`Record::FilterDefaulted`], so
     /// choosing the filter and emitting the notice are one decision.
     #[must_use]
     pub const fn into_filter_and_notice(self) -> (LogFilter, Option<Record>) {
         match self.0 {
+            FilterParseKind::Absent => (LogFilter::Info, None),
             FilterParseKind::Accepted(filter) => (filter, None),
-            FilterParseKind::Defaulted => (LogFilter::Info, Some(Record::FilterDefaulted)),
+            FilterParseKind::Unrecognized => (LogFilter::Info, Some(Record::FilterDefaulted)),
         }
     }
 }
@@ -217,7 +224,8 @@ pub enum Record {
         /// Log records dropped since startup.
         dropped: u64,
     },
-    /// `RUST_LOG` was absent or unrecognised, so the filter defaulted to info.
+    /// `RUST_LOG` supplied a value that named no severity, so the filter
+    /// defaulted to info.
     FilterDefaulted,
     /// A drain the sink failed, reported once per failure episode.
     SinkFailure {
@@ -749,7 +757,7 @@ mod tests {
         );
         assert_eq!(
             LogFilter::parse(None).into_filter_and_notice(),
-            (LogFilter::Info, Some(Record::FilterDefaulted))
+            (LogFilter::Info, None)
         );
         assert_eq!(
             LogFilter::parse(Some("debug")).into_filter_and_notice(),
@@ -758,18 +766,18 @@ mod tests {
     }
 
     #[test]
-    fn filter_parse_defaults_to_info_for_absent_or_unknown() {
-        for raw in [
-            None,
-            Some(""),
-            Some("debug"),
-            Some("trace"),
-            Some("warning"),
-            Some("info,debug"),
-            Some("="),
-        ] {
+    fn an_absent_rust_log_defaults_to_info_without_a_notice() {
+        assert_eq!(
+            LogFilter::parse(None).into_filter_and_notice(),
+            (LogFilter::Info, None)
+        );
+    }
+
+    #[test]
+    fn a_supplied_but_unrecognised_rust_log_defaults_with_one_warn_notice() {
+        for raw in ["", "debug", "trace", "warning", "info,debug", "="] {
             assert_eq!(
-                LogFilter::parse(raw).into_filter_and_notice(),
+                LogFilter::parse(Some(raw)).into_filter_and_notice(),
                 (LogFilter::Info, Some(Record::FilterDefaulted)),
                 "raw {raw:?}"
             );

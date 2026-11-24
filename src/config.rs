@@ -10,8 +10,9 @@ use crate::port::{ListenPort, PortError};
 /// `PORT` is the only fatal input: [`ListenPort::from_env`] rejects a missing,
 /// non-numeric, or out-of-range value with [`ConfigError::Port`]. `RUST_LOG` is
 /// bounded and non-fatal: [`LogFilter::parse`] recognises exactly `off`, `error`,
-/// `warn`, and `info`, and defaults every other value to [`LogFilter::Info`]
-/// together with [`Record::FilterDefaulted`], which the plan carries as its
+/// `warn`, and `info`, defaults an absent value to [`LogFilter::Info`] with no
+/// notice, and defaults any other supplied value to [`LogFilter::Info`] together
+/// with [`Record::FilterDefaulted`], which the plan carries as its
 /// [`RuntimePlan::notice`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimePlan {
@@ -20,7 +21,7 @@ pub struct RuntimePlan {
     /// The severity filter every record is written through.
     pub filter: LogFilter,
     /// The record the filter choice requires, present only when `RUST_LOG`
-    /// defaulted.
+    /// supplied an unrecognised value.
     pub notice: Option<Record>,
 }
 
@@ -77,15 +78,23 @@ impl std::error::Error for ConfigError {}
 #[cfg(test)]
 mod tests {
     use super::{ConfigError, RuntimePlan};
-    use crate::log::{LogFilter, Record};
+    use crate::log::{Level, LogFilter, Record};
     use crate::port::{ListenPort, Port, PortError};
 
     #[test]
-    fn absent_rust_log_defaults_the_filter_and_carries_the_notice() {
+    fn absent_rust_log_defaults_the_filter_without_a_notice() {
         let plan = RuntimePlan::from_inputs(Ok(ListenPort::Ephemeral), None).unwrap();
         assert_eq!(plan.listen, ListenPort::Ephemeral);
         assert_eq!(plan.filter, LogFilter::Info);
+        assert_eq!(plan.notice, None);
+    }
+
+    #[test]
+    fn an_unrecognised_rust_log_defaults_the_filter_with_one_warn_notice() {
+        let plan = RuntimePlan::from_inputs(Ok(ListenPort::Ephemeral), Some("garbage")).unwrap();
+        assert_eq!(plan.filter, LogFilter::Info);
         assert_eq!(plan.notice, Some(Record::FilterDefaulted));
+        assert_eq!(plan.notice.map(Record::level), Some(Level::Warn));
     }
 
     #[test]

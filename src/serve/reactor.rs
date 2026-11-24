@@ -38,7 +38,7 @@ use signal_hook::low_level::pipe as signal_pipe;
 
 use crate::exit::ExitCode;
 use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, Reply, ResponsePlan};
-use crate::log::sink::{self, DrainBudget, DrainOutcome, LOG_RETRY, SHUTDOWN_DRAIN};
+use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DRAIN, LOG_RETRY};
 use crate::log::{LogFilter, LogStore, Record, WriteOutcome};
 
 use super::MAX_CONNECTIONS;
@@ -426,7 +426,11 @@ impl Reactor {
         self.shutting_down
     }
 
-    /// The requests whose reply the reactor wrote completely.
+    /// The requests whose planned reply the reactor wrote completely.
+    ///
+    /// Only a request line that parsed and selected a `200`, `404`, or `405` reply
+    /// counts, and only once every byte of that reply left the reactor. A refusal
+    /// is never counted here, whatever it wrote.
     ///
     /// Saturates at `u64::MAX`.
     #[must_use]
@@ -434,11 +438,13 @@ impl Reactor {
         self.served
     }
 
-    /// The connections the reactor closed without answering.
+    /// The requests the reactor refused.
     ///
-    /// A rejection is a malformed head, an oversized head, or a connection whose
-    /// absolute deadline passed before its reply completed. A client that leaves
-    /// before its head terminates is neither served nor rejected.
+    /// A refusal is a malformed head (`400`), an oversized head (`431`), or a
+    /// connection whose absolute deadline passed before its reply completed. It is
+    /// counted when the reactor decides it rather than when its reply finishes, so
+    /// a `400` or `431` whose reply was cut short still counts, while a client
+    /// that leaves before its head terminates is neither served nor rejected.
     ///
     /// Saturates at `u64::MAX`.
     #[must_use]
@@ -511,6 +517,9 @@ impl Reactor {
     /// A poll the platform reports as interrupted is retried, because the
     /// shutdown handler this reactor installs is itself a signal handler: the
     /// byte it writes makes the retried poll return at once with the signal token.
+    /// The retry re-derives its timeout from [`Instant::now`] against the deadline
+    /// the wait owns, so an interruption never grants a fresh full timeout, and
+    /// [`TurnWait::Immediate`] keeps its zero timeout on every retry.
     ///
     /// `now` dates the wait only. A caller samples that instant before this
     /// call and samples a fresh one for [`Reactor::turn`] after it returns, so
@@ -520,13 +529,18 @@ impl Reactor {
     ///
     /// Returns [`ServeError::Poll`] when the poller fails.
     pub fn wait(&mut self, now: Instant, wait: TurnWait) -> Result<(), ServeError> {
-        let timeout = match wait {
-            TurnWait::Immediate => Some(Duration::ZERO),
-            TurnWait::UntilDeadline => self
-                .next_deadline(now)
-                .map(|deadline| deadline.saturating_duration_since(now)),
+        let deadline = match wait {
+            TurnWait::Immediate => None,
+            TurnWait::UntilDeadline => self.next_deadline(now),
         };
         loop {
+            let timeout = match (wait, deadline) {
+                (TurnWait::Immediate, _) => Some(Duration::ZERO),
+                (TurnWait::UntilDeadline, Some(deadline)) => {
+                    Some(deadline.saturating_duration_since(Instant::now()))
+                }
+                (TurnWait::UntilDeadline, None) => None,
+            };
             match self.poll.poll(&mut self.events, timeout) {
                 Ok(()) => break,
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}
@@ -622,7 +636,7 @@ impl Reactor {
     ///
     /// Queues exactly one [`Record::Shutdown`] carrying the counters and the drop
     /// count sampled at this instant, then runs exactly one
-    /// [`sink::drain_until`] under [`SHUTDOWN_DRAIN`]: the drain repeats its
+    /// [`sink::drain_until`] under [`FLUSH_DRAIN`]: the drain repeats its
     /// bounded turn while it progresses and the deadline has not passed, so the
     /// flush is bounded even against a reader that never drains. The sink's
     /// failure latch does not suppress it — the last attempt is the one worth
@@ -649,7 +663,7 @@ impl Reactor {
             dropped: store.dropped(),
         };
         let record = store.write(filter, record);
-        let drain = sink::drain_until(store, sink, DrainBudget::DEFAULT, now + SHUTDOWN_DRAIN);
+        let drain = sink::drain_until(store, sink, DrainBudget::DEFAULT, now + FLUSH_DRAIN);
         ShutdownReport { record, drain }
     }
 
