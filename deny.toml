@@ -40,6 +40,7 @@ ignore = [
 multiple-versions = "deny"
 skip = [
     { name = "windows-sys", version = "0.52.0", reason = "Windows-only target crate pinned by the actix baseline lock; coexists with 0.59.0; never compiled on the darwin/linux targets this repo builds; removed with actix in M03" },
+    { name = "windows-sys", version = "0.61.2", reason = "Windows-only target crate pinned by mio 1.2.4 in M05; coexists with 0.52.0 and 0.59.0; never compiled on the darwin/linux targets this repo builds; removed when the direct mio dependency is the only mio" },
 ]
 
 [sources]
