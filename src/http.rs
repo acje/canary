@@ -12,8 +12,12 @@
 /// head terminator is [`ParseOutcome::TooLarge`].
 pub const MAX_HEAD_BYTES: usize = 1024;
 
-/// The fixed capacity of every planned reply, in bytes.
-const RESPONSE_BYTES: usize = 512;
+/// The largest reply the plan renders, in bytes.
+///
+/// Every planned reply is a fixed array of this size with a shorter live
+/// length, so no rendered reply is longer than this bound. The serving write
+/// path asserts its per-turn write budget covers one whole reply.
+pub const MAX_REPLY_BYTES: usize = 512;
 
 /// The largest version text a liveness body accepts, in bytes.
 pub const MAX_VERSION_BYTES: usize = 128;
@@ -47,18 +51,20 @@ const LIVENESS_MAX_BYTES: usize = LIVENESS_PREFIX.len() + MAX_VERSION_BYTES + LI
 /// The digits a planned `Content-Length` value may need.
 const MAX_LENGTH_DIGITS: usize = decimal_len(LIVENESS_MAX_BYTES);
 
-const _: () = assert!(planned_bytes(STATUS_OK, &[], LIVENESS_MAX_BYTES) <= RESPONSE_BYTES);
-const _: () = assert!(planned_bytes(STATUS_NOT_FOUND, &[], NOT_FOUND_BODY.len()) <= RESPONSE_BYTES);
+const _: () = assert!(planned_bytes(STATUS_OK, &[], LIVENESS_MAX_BYTES) <= MAX_REPLY_BYTES);
+const _: () =
+    assert!(planned_bytes(STATUS_NOT_FOUND, &[], NOT_FOUND_BODY.len()) <= MAX_REPLY_BYTES);
 const _: () = assert!(
     planned_bytes(
         STATUS_METHOD_NOT_ALLOWED,
         ALLOW,
         METHOD_NOT_ALLOWED_BODY.len()
-    ) <= RESPONSE_BYTES
+    ) <= MAX_REPLY_BYTES
 );
 const _: () =
-    assert!(planned_bytes(STATUS_BAD_REQUEST, &[], BAD_REQUEST_BODY.len()) <= RESPONSE_BYTES);
-const _: () = assert!(planned_bytes(STATUS_TOO_LARGE, &[], TOO_LARGE_BODY.len()) <= RESPONSE_BYTES);
+    assert!(planned_bytes(STATUS_BAD_REQUEST, &[], BAD_REQUEST_BODY.len()) <= MAX_REPLY_BYTES);
+const _: () =
+    assert!(planned_bytes(STATUS_TOO_LARGE, &[], TOO_LARGE_BODY.len()) <= MAX_REPLY_BYTES);
 
 /// The request method classes the reply plan distinguishes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -388,7 +394,7 @@ impl ResponsePlan {
 
 /// One planned reply held as a fixed byte array plus its two lengths.
 struct Wire {
-    bytes: [u8; RESPONSE_BYTES],
+    bytes: [u8; MAX_REPLY_BYTES],
     len: usize,
     head_len: usize,
 }
@@ -473,21 +479,21 @@ const fn decimal_len(value: usize) -> usize {
 
 /// An inline reply buffer that grows by copying, never by allocating.
 struct Builder {
-    bytes: [u8; RESPONSE_BYTES],
+    bytes: [u8; MAX_REPLY_BYTES],
     len: usize,
 }
 
 impl Builder {
     const fn new() -> Self {
         Self {
-            bytes: [0; RESPONSE_BYTES],
+            bytes: [0; MAX_REPLY_BYTES],
             len: 0,
         }
     }
 
     fn push(&mut self, part: &[u8]) {
         let end = self.len + part.len();
-        assert!(end <= RESPONSE_BYTES, "reply exceeds its fixed buffer");
+        assert!(end <= MAX_REPLY_BYTES, "reply exceeds its fixed buffer");
         self.bytes[self.len..end].copy_from_slice(part);
         self.len = end;
     }

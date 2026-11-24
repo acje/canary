@@ -7,8 +7,10 @@
 //! never holds a reply buffer of its own.
 //!
 //! [`reactor::Reactor`] owns the listening socket, the slot table, and the
-//! poller. Every [`reactor::Reactor::turn`] call does a fixed set of bounded
-//! steps, so no turn can block on a socket or on the log sink.
+//! poller. A turn is [`reactor::Reactor::wait`] — the poll that snapshots the
+//! readiness — followed by [`reactor::Reactor::turn`] — a fixed set of bounded
+//! steps dated by the instant the caller samples after the wait returns — so no
+//! turn can block on a socket or on the log sink.
 
 pub mod reactor;
 pub mod slots;
