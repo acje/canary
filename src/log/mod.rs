@@ -993,7 +993,6 @@ mod tests {
     #[test]
     fn queue_reserves_the_full_ring_once() {
         let store = store();
-        assert!(store.bytes.capacity() >= QUEUE_BYTES);
         assert_eq!(store.bytes.len(), QUEUE_BYTES);
         assert_eq!(store.len(), 0);
         assert!(store.is_empty());
