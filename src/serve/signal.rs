@@ -21,11 +21,11 @@ const SIGNAL_BYTE: u8 = b'X';
 /// The read end of the shutdown self-pipe and the write end the handlers feed.
 ///
 /// The read end is the mio source [`Reactor::new`](super::reactor::Reactor::new)
-/// registers at [`TOKEN_SIGNAL`](super::reactor::TOKEN_SIGNAL): a registered
+/// registers at `TOKEN_SIGNAL`: a registered
 /// handler writes one byte into the pipe, so the poller wakes with the token and
 /// the reactor reads the request where an ordinary turn can act on it.
 ///
-/// [`ShutdownSignals::detached`] builds the pipe without touching a process
+/// `ShutdownSignals::detached` builds the pipe without touching a process
 /// signal handler, which is how a test drives shutdown by writing a byte into it
 /// itself. [`ShutdownSignals::install`] is the only constructor that registers
 /// handlers, and only the one value it returns owns them: dropping that value
@@ -68,7 +68,7 @@ impl ShutdownSignals {
     ///
     /// # Errors
     ///
-    /// Returns [`ShutdownSignals::detached`]'s error, or the operating system
+    /// Returns `ShutdownSignals::detached`'s error, or the operating system
     /// error when a write-end clone or a signal registration fails. A failure
     /// part way through unregisters the signals already registered.
     pub fn install() -> io::Result<Self> {

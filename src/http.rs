@@ -1,6 +1,6 @@
 //! Bounded HTTP/1.1 request-head parsing and the startup-built reply plan.
 //!
-//! The parser inspects at most [`MAX_HEAD_BYTES`] of head bytes and never
+//! The parser inspects at most `MAX_HEAD_BYTES` of head bytes and never
 //! allocates. [`ResponsePlan`] renders five reply buffers once from the build
 //! version; they serve the seven reply outcomes (200 and 404, each in a
 //! `Full` and a `HeadOnly` form, plus 405, 400, and 431), so the connection
@@ -315,7 +315,7 @@ impl ResponsePlan {
     /// # Panics
     ///
     /// Panics if `version` holds a byte outside visible ASCII or exceeds
-    /// [`MAX_VERSION_BYTES`]. The build supplies `CARGO_PKG_VERSION`, so a
+    /// `MAX_VERSION_BYTES`. The build supplies `CARGO_PKG_VERSION`, so a
     /// panic reports a broken build before any request is served.
     #[must_use]
     pub fn new(version: &str) -> Self {

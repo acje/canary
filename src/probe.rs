@@ -142,11 +142,11 @@ impl std::error::Error for ProbeFailure {}
 /// Probes the listener named by `PORT` in the process environment.
 ///
 /// The probe reads no other input and starts nothing: it connects to
-/// `127.0.0.1:<port>` within [`CONNECT_TIMEOUT`], writes one bounded request,
-/// reads at most [`STATUS_LIMIT`] reply bytes within one [`READ_TIMEOUT`]
+/// `127.0.0.1:<port>` within `CONNECT_TIMEOUT`, writes one bounded request,
+/// reads at most `STATUS_LIMIT` reply bytes within one `READ_TIMEOUT`
 /// window, and is healthy only when the reply begins with an `HTTP/1.1 200`
-/// status line. The whole probe is therefore bounded by [`CONNECT_TIMEOUT`]
-/// plus [`READ_TIMEOUT`].
+/// status line. The whole probe is therefore bounded by `CONNECT_TIMEOUT`
+/// plus `READ_TIMEOUT`.
 pub fn run() -> ProbeOutcome {
     check_listen(PortRequest::from_env())
 }

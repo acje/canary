@@ -243,12 +243,12 @@ impl Reactor {
     /// Registers `listener` and the shutdown pipe with the poller and reserves
     /// the event buffers.
     ///
-    /// The events buffer is reserved with exactly [`MAX_EVENTS`] slots, so the
+    /// The events buffer is reserved with exactly `MAX_EVENTS` slots, so the
     /// token snapshot [`Reactor::wait`] takes can never drop an event the poller
     /// collected.
     ///
     /// `signals` is the caller's choice of shutdown source: [`ShutdownSignals::install`]
-    /// makes a real signal reach the poller, and [`ShutdownSignals::detached`]
+    /// makes a real signal reach the poller, and `ShutdownSignals::detached`
     /// keeps the process's handlers out of the loop so a test can drive the pipe
     /// itself. Either way the reactor owns the value, which keeps the pipe's
     /// write end open for the reactor's lifetime.
@@ -262,7 +262,7 @@ impl Reactor {
     /// # Panics
     ///
     /// Panics when the poller rounds the reserved event capacity below
-    /// [`MAX_EVENTS`]. The poller documents its capacity as the reserved value,
+    /// `MAX_EVENTS`. The poller documents its capacity as the reserved value,
     /// so a rounding change breaks the snapshot invariant and must fail here
     /// rather than serve.
     pub fn new(
@@ -400,7 +400,7 @@ impl Reactor {
     /// Waits for readiness and snapshots the tokens [`Reactor::turn`] acts on.
     ///
     /// The timeout is [`TurnWait::Immediate`] for no wait, and otherwise the
-    /// distance from `now` to [`Reactor::next_deadline`]; a
+    /// distance from `now` to `Reactor::next_deadline`; a
     /// [`TurnWait::UntilDeadline`] wait that owns no deadline blocks until an
     /// event arrives, and the shutdown pipe waking it is one such event.
     ///
@@ -482,14 +482,14 @@ impl Reactor {
     /// else, so a turn without a preceding wait sees an empty snapshot and runs
     /// only the work the deadlines it owns make due.
     ///
-    /// The shutdown step runs first: a snapshot carrying [`TOKEN_SIGNAL`] drains
+    /// The shutdown step runs first: a snapshot carrying `TOKEN_SIGNAL` drains
     /// the pipe, latches the request, and returns [`TurnOutcome::ShuttingDown`]
     /// before any other step, so no accept, read, or write follows a signal. A
     /// turn after the latch reports the same outcome without doing work, which is
     /// what absorbs a second signal.
     ///
     /// Otherwise the turn consumes the snapshot, accepts at most
-    /// [`ACCEPT_PER_TURN`] connections, visits each connection with an event at
+    /// `ACCEPT_PER_TURN` connections, visits each connection with an event at
     /// most once, releases every connection whose deadline `now` has passed,
     /// queues the aggregate tick when it is due, and drains the log queue once.
     /// Accepts run before the sweep, which is load-bearing rather than

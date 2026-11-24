@@ -8,9 +8,9 @@ use crate::port::{PortError, PortRequest};
 
 /// The configuration the process needs before it binds a listener.
 ///
-/// `PORT` is the only fatal input: [`PortRequest::from_env`] rejects a missing,
+/// `PORT` is the only fatal input: `PortRequest::from_env` rejects a missing,
 /// non-numeric, or out-of-range value with [`ConfigError::Port`]. `RUST_LOG` is
-/// bounded and non-fatal: [`LogFilter::parse`] recognises exactly `off`, `error`,
+/// bounded and non-fatal: `LogFilter::parse` recognises exactly `off`, `error`,
 /// `warn`, and `info`, defaults an absent value to [`LogFilter::Info`] with no
 /// notice, and defaults any other supplied value to [`LogFilter::Info`] together
 /// with [`Record::FilterUnrecognised`], which the plan carries as its

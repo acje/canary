@@ -113,7 +113,7 @@ impl DrainBudget {
 
 /// Offers queued records to `sink` for at most `budget` work.
 ///
-/// The turn re-reads [`LogQueue::unwritten_front`] before every attempt and
+/// The turn re-reads `LogQueue::unwritten_front` before every attempt and
 /// offers the front record once, so a short write resumes where it stopped.
 /// [`DrainOutcome::Moved`] counts what the store actually released, never
 /// what the sink was offered. Bytes a turn released before a full sink refused
@@ -122,7 +122,7 @@ impl DrainBudget {
 /// [`DrainOutcome::Stalled`], and a hard error returns [`DrainOutcome::Failed`]
 /// with the offered record still queued.
 ///
-/// A [`ConsumeOutcome::Rejected`] answer, or a write that claims more bytes than
+/// A `ConsumeOutcome::Rejected` answer, or a write that claims more bytes than
 /// it was offered, is an internal contract violation and returns
 /// [`DrainOutcome::Failed`] with [`ErrorKind::InvalidInput`] without retrying.
 /// The `accepted > offered` check below is the only place this sink enforces the

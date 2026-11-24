@@ -5,7 +5,7 @@ use std::fmt;
 /// A fixed TCP port number in `1..=65535`.
 ///
 /// The wrapped value is private so every instance has passed the range check;
-/// construct one through [`Port::parse`] or [`Port::try_from`].
+/// construct one through `Port::parse` or [`Port::try_from`].
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Port(u16);
 
@@ -123,9 +123,9 @@ pub enum PortError {
     NonNumeric,
     /// `PORT` is decimal zero or greater than `65535`.
     ///
-    /// Zero shares this variant on purpose: [`PortRequest::parse`] resolves
+    /// Zero shares this variant on purpose: `PortRequest::parse` resolves
     /// every all-zero spelling to [`PortRequest::Ephemeral`] before
-    /// [`Port::parse`] runs, so the zero case is reachable only from a caller
+    /// `Port::parse` runs, so the zero case is reachable only from a caller
     /// that bypasses the operator input, and a separate variant would force an
     /// operator-visible stderr change on no operator path.
     OutOfRange,

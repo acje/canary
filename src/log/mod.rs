@@ -1,6 +1,6 @@
 //! Bounded log queue for the single-owner reactor.
 //!
-//! Storage is a ring of [`QUEUE_SLOTS`] fixed [`SLOT_BYTES`] slots reserved once
+//! Storage is a ring of `QUEUE_SLOTS` fixed `SLOT_BYTES` slots reserved once
 //! by [`LogQueue::new`]. A record is rendered into one slot before the queue is
 //! touched, so a record either occupies a whole slot or is dropped; a dropped
 //! record never leaves a partial line behind.
@@ -19,9 +19,9 @@
 //! counter is unsigned decimal, so a value cannot contain a space, `=`, or a
 //! line break. The grammar therefore needs no escaping.
 //!
-//! [`LogFilter::allows`] is the only filter decision. Startup, tick, and
-//! shutdown records are [`Level::Info`]; the unrecognised-value notice is
-//! [`Level::Warn`]; the sink-failure notice is [`Level::Error`], so an operator
+//! `LogFilter::allows` is the only filter decision. Startup, tick, and
+//! shutdown records are `Level::Info`; the unrecognised-value notice is
+//! `Level::Warn`; the sink-failure notice is `Level::Error`, so an operator
 //! who sets `RUST_LOG=error` still learns that external diagnostics are lost. An
 //! absent `RUST_LOG` defaults the filter to [`LogFilter::Info`] and records
 //! nothing, because that is the normal boot.
@@ -116,9 +116,9 @@ impl Level {
 pub enum LogFilter {
     /// Suppress every record.
     Off,
-    /// Keep [`Level::Error`] records.
+    /// Keep `Level::Error` records.
     Error,
-    /// Keep [`Level::Warn`] and [`Level::Error`] records.
+    /// Keep `Level::Warn` and `Level::Error` records.
     Warn,
     /// Keep every record.
     Info,
@@ -319,7 +319,7 @@ impl std::error::Error for LogQueueError {}
 
 /// A fixed-capacity log queue with a durable partial-consume cursor.
 ///
-/// The ring holds at most [`QUEUE_SLOTS`] records of at most [`SLOT_BYTES`] bytes
+/// The ring holds at most `QUEUE_SLOTS` records of at most `SLOT_BYTES` bytes
 /// each. The byte buffer is reserved once by [`LogQueue::new`] and never grows;
 /// [`LogQueue::enqueue`] rejects a record rather than allocate.
 pub struct LogQueue {
@@ -337,7 +337,7 @@ impl LogQueue {
     /// # Errors
     ///
     /// Returns [`LogQueueError::Reserve`] when the operating system cannot
-    /// provide [`QUEUE_BYTES`] bytes at startup.
+    /// provide `QUEUE_BYTES` bytes at startup.
     pub fn new() -> Result<Self, LogQueueError> {
         let mut bytes = Vec::new();
         bytes
