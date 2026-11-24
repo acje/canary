@@ -1257,6 +1257,12 @@ mod tests {
     }
 
     #[test]
+    fn a_signal_pipe_error_names_its_step() {
+        let error = ServeError::SignalPipe(ErrorKind::BrokenPipe);
+        assert_eq!(error.to_string(), "reactor signal failed: BrokenPipe");
+    }
+
+    #[test]
     fn get_root_answers_200_with_the_liveness_body() {
         let mut harness = Harness::new();
         let received = harness.exchange(b"GET / HTTP/1.1\r\n\r\n");
