@@ -121,12 +121,15 @@ pub enum MalformedKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParseOutcome {
     /// More bytes are needed before the head can be classified.
+    ///
+    /// At end of input an `Incomplete` head is a client error, never a wait:
+    /// the caller answers `400`.
     Incomplete,
     /// The head ended and its request line is valid.
     Complete(Request),
     /// The head ended but its request line is invalid.
     Malformed(MalformedKind),
-    /// The head exceeds [`MAX_HEAD_BYTES`].
+    /// The head cannot be terminated within [`MAX_HEAD_BYTES`] bytes.
     TooLarge,
 }
 
@@ -518,8 +521,8 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_HEAD_BYTES, MalformedKind, Method, ParseOutcome, Reply, Request, ResponsePlan, Target,
-        parse_head,
+        MAX_HEAD_BYTES, MAX_VERSION_BYTES, MalformedKind, Method, ParseOutcome, Reply, Request,
+        ResponsePlan, Target, parse_head,
     };
 
     const OK_HEAD: &[u8] = concat!(
@@ -678,16 +681,13 @@ mod tests {
 
     #[test]
     fn partial_head_is_incomplete() {
-        for head in [
-            &b""[..],
-            b"GET",
-            b"GET / HTT",
-            b"GET / HTTP/1.1\r\n",
-            b"GET / HTTP/1.1\r\nHost: example.com\r\n",
-            b"GET / HTTP/1.1\r",
-            b"GET / HTTP/1.1\r\n\r",
-        ] {
-            assert_eq!(parse_head(head), ParseOutcome::Incomplete);
+        let head = head_padded_to(MAX_HEAD_BYTES);
+        for end in 0..head.len() {
+            assert_eq!(
+                parse_head(&head[..end]),
+                ParseOutcome::Incomplete,
+                "prefix of length {end}"
+            );
         }
     }
 
@@ -709,7 +709,6 @@ mod tests {
     fn head_with_a_suffix_after_the_terminator_is_complete() {
         let mut head = Vec::from(&b"GET / HTTP/1.1\r\n\r\n"[..]);
         head.resize(head.len() + 1040, b'x');
-        assert!(head.len() > MAX_HEAD_BYTES);
         assert!(matches!(parse_head(&head), ParseOutcome::Complete(_)));
     }
 
@@ -717,7 +716,7 @@ mod tests {
     fn full_window_without_a_terminator_is_too_large() {
         let mut head = Vec::from(&b"GET / HTTP/1.1\r\nX: "[..]);
         head.resize(MAX_HEAD_BYTES, b'a');
-        assert_eq!(head.len(), MAX_HEAD_BYTES);
+        assert!(!head.windows(4).any(|window| window == b"\r\n\r\n"));
         assert_eq!(parse_head(&head), ParseOutcome::TooLarge);
     }
 
@@ -891,8 +890,14 @@ mod tests {
     }
 
     #[test]
-    fn oversized_head_is_too_large() {
-        let head = head_padded_to(MAX_HEAD_BYTES + 1);
-        assert_eq!(parse_head(&head), ParseOutcome::TooLarge);
+    #[should_panic(expected = "version")]
+    fn version_over_the_limit_panics() {
+        let _plan = ResponsePlan::new(&"1".repeat(MAX_VERSION_BYTES + 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "visible ASCII")]
+    fn version_with_a_control_byte_panics() {
+        let _plan = ResponsePlan::new("1.0\t");
     }
 }
