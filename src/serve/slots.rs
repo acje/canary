@@ -276,27 +276,22 @@ impl Slots {
         true
     }
 
-    /// Removes every occupant past its deadline at `now` and yields it.
+    /// Removes every occupant past its deadline at `now` and yields its stream.
     ///
-    /// Scans every slot once and yields `(index, stream)` in ascending slot
-    /// order for each occupant whose absolute deadline `now` is strictly after,
-    /// so an instant exactly at the deadline expires nothing. Each yielded slot
-    /// is already vacant and its stream is owned by the caller, so a yielded
-    /// index cannot name a fresh occupant: the next [`Slots::acquire`] claims
-    /// the lowest free slot for a new connection.
-    pub fn take_expired(
-        &mut self,
-        now: Instant,
-    ) -> impl Iterator<Item = (usize, TcpStream)> + use<> {
-        let mut expired: [Option<(usize, TcpStream)>; MAX_CONNECTIONS] =
-            std::array::from_fn(|_| None);
+    /// Scans every slot once and yields the owned stream of each occupant whose
+    /// absolute deadline `now` is strictly after, in ascending slot order, so an
+    /// instant exactly at the deadline expires nothing. Each yielded slot is
+    /// already vacant and its stream is owned by the caller, so the next
+    /// [`Slots::acquire`] claims the lowest free slot for a new connection.
+    pub fn take_expired(&mut self, now: Instant) -> impl Iterator<Item = TcpStream> + use<> {
+        let mut expired: [Option<TcpStream>; MAX_CONNECTIONS] = std::array::from_fn(|_| None);
         for (index, entry) in self.entries.iter_mut().enumerate() {
             if entry
                 .as_ref()
                 .is_some_and(|occupant| now > occupant.expires_at)
                 && let Some(occupant) = entry.take()
             {
-                expired[index] = Some((index, occupant.stream));
+                expired[index] = Some(occupant.stream);
                 self.len -= 1;
             }
         }
@@ -504,15 +499,14 @@ mod tests {
         let mut slots = Slots::new();
         let accepted = Instant::now();
         let (stream, _peer) = fixture.stream();
-        let index = slots.acquire(stream, accepted).unwrap();
+        assert_eq!(slots.acquire(stream, accepted), Some(0));
         assert_eq!(
             slots.take_expired(accepted + CONNECTION_DEADLINE).count(),
             0
         );
         let mut expired =
             slots.take_expired(accepted + CONNECTION_DEADLINE + Duration::from_nanos(1));
-        let (taken, _stream) = expired.next().unwrap();
-        assert_eq!(taken, index);
+        let _stream = expired.next().unwrap();
         assert!(expired.next().is_none());
         assert!(slots.is_empty());
     }
@@ -525,17 +519,15 @@ mod tests {
         let (stream, _peer) = fixture.stream();
         let index = slots.acquire(stream, accepted).unwrap();
         let late = accepted + CONNECTION_DEADLINE + Duration::from_nanos(1);
-        let (taken, _stream) = slots.take_expired(late).next().unwrap();
-        assert_eq!(taken, index);
+        let _stream = slots.take_expired(late).next().unwrap();
         assert!(slots.is_empty());
         let (replacement, _replacement_peer) = fixture.stream();
         assert_eq!(slots.acquire(replacement, late), Some(index));
         assert_eq!(slots.take_expired(late).count(), 0);
-        let (fresh, _fresh_stream) = slots
+        let _fresh = slots
             .take_expired(late + CONNECTION_DEADLINE + Duration::from_nanos(1))
             .next()
             .unwrap();
-        assert_eq!(fresh, index);
     }
 
     #[test]

@@ -889,7 +889,7 @@ impl Reactor {
     fn expire(&mut self, now: Instant) -> Result<bool, ServeError> {
         let reopen = !self.listener_registered;
         let mut count = 0;
-        for (_index, mut stream) in self.slots.take_expired(now) {
+        for mut stream in self.slots.take_expired(now) {
             self.poll
                 .registry()
                 .deregister(&mut stream)
