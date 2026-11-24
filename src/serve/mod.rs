@@ -11,14 +11,16 @@
 //! that snapshots the readiness — followed by [`reactor::Reactor::turn`] — a
 //! fixed set of bounded steps dated by the instant the caller samples after the
 //! wait returns — so no turn can block on a socket, on the signal pipe, or on
-//! the log sink. [`reactor::ShutdownSignals`] owns the pipe: its installed form
+//! the log sink. [`signal::ShutdownSignals`] owns the pipe: its installed form
 //! is the reactor's only path from a `SIGTERM` or `SIGINT` to shutdown, and its
 //! detached form keeps process handlers out of a test.
 
 pub mod reactor;
+pub mod signal;
 pub mod slots;
 
-pub use reactor::{Reactor, ServeError, ShutdownReport, ShutdownSignals, TurnOutcome, TurnWait};
+pub use reactor::{Reactor, ServeError, ShutdownReport, TurnOutcome, TurnWait};
+pub use signal::ShutdownSignals;
 pub use slots::{ConnectionPhase, ReplyChoice, Slots, WriteProgress};
 
 use std::time::Duration;

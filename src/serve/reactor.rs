@@ -25,21 +25,17 @@
 //! unfinished drain schedules.
 
 use std::fmt;
-use std::io::{self, ErrorKind, PipeWriter, Read, Write};
-use std::os::fd::OwnedFd;
+use std::io::{ErrorKind, Read, Write};
 use std::time::{Duration, Instant};
 
 use mio::net::TcpListener;
-use mio::unix::pipe::Receiver;
 use mio::{Events, Interest, Poll, Token};
-use signal_hook::SigId;
-use signal_hook::consts::{SIGINT, SIGTERM};
-use signal_hook::low_level::pipe as signal_pipe;
 
 use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, ParseOutcome, Reply, ResponsePlan};
 use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DEADLINE, LOG_RETRY};
 use crate::log::{Counters, LogFilter, LogQueue, QueueOutcome, Record};
 
+use super::signal::ShutdownSignals;
 use super::slots::{ConnectionPhase, ReplyChoice, Slots, WriteProgress};
 use super::{HEAD_BYTES, MAX_CONNECTIONS};
 
@@ -90,118 +86,10 @@ pub const SIGNAL_DRAIN_BYTES: usize = 64;
 /// reports [`TurnOutcome::ShuttingDown`] again.
 pub const SIGNAL_READS_PER_TURN: usize = 8;
 
-/// The number of signals [`ShutdownSignals`] subscribes to.
-const SHUTDOWN_SIGNAL_COUNT: usize = 2;
-
-/// The signals that request a shutdown.
-const SHUTDOWN_SIGNALS: [libc::c_int; SHUTDOWN_SIGNAL_COUNT] = [SIGTERM, SIGINT];
-
 const _: () = assert!(TOKEN_LISTENER < TOKEN_SIGNAL);
 const _: () = assert!(TOKEN_SIGNAL < TOKEN_FIRST_CONNECTION);
 const _: () = assert!(TOKEN_LAST_CONNECTION.checked_add(1).is_some());
 const _: () = assert!(WRITE_BYTES_PER_TURN >= MAX_REPLY_BYTES);
-
-/// The read end of the shutdown self-pipe and the write end the handlers feed.
-///
-/// The read end is the mio source [`Reactor::new`] registers at
-/// [`TOKEN_SIGNAL`]: a registered handler writes one byte into the pipe, so the
-/// poller wakes with the token and the reactor reads the request where an
-/// ordinary turn can act on it.
-///
-/// [`ShutdownSignals::detached`] builds the pipe without touching a process
-/// signal handler, which is how a test drives shutdown by writing a byte into it
-/// itself. [`ShutdownSignals::install`] is the only constructor that registers
-/// handlers, and only the one value it returns owns them: dropping that value
-/// unregisters them.
-///
-/// The write end is kept for the value's lifetime even though the handlers own a
-/// clone of it. A pipe whose write end has no owner left reports end-of-file on
-/// every read while staying readable, so a retained writer is what keeps the
-/// registered source from waking the poller for nothing.
-#[derive(Debug)]
-pub struct ShutdownSignals {
-    receiver: Receiver,
-    writer: PipeWriter,
-    registrations: [Option<SigId>; SHUTDOWN_SIGNAL_COUNT],
-}
-
-impl ShutdownSignals {
-    /// Creates the self-pipe without registering a signal handler.
-    ///
-    /// # Errors
-    ///
-    /// Returns the operating system error when the pipe cannot be created or its
-    /// read end cannot be switched to nonblocking mode.
-    pub fn detached() -> io::Result<Self> {
-        let (reader, writer) = io::pipe()?;
-        let receiver = Receiver::from(OwnedFd::from(reader));
-        receiver.set_nonblocking(true)?;
-        Ok(Self {
-            receiver,
-            writer,
-            registrations: [None; SHUTDOWN_SIGNAL_COUNT],
-        })
-    }
-
-    /// Creates the self-pipe and registers `SIGTERM` and `SIGINT` to write into
-    /// it.
-    ///
-    /// Each registration takes ownership of its own clone of the write end, so
-    /// the handlers never share a descriptor with the value this returns.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ShutdownSignals::detached`]'s error, or the operating system
-    /// error when a write-end clone or a signal registration fails. A failure
-    /// part way through unregisters the signals already registered.
-    pub fn install() -> io::Result<Self> {
-        let mut signals = Self::detached()?;
-        let Self {
-            writer,
-            registrations,
-            ..
-        } = &mut signals;
-        for (registration, signal) in registrations.iter_mut().zip(SHUTDOWN_SIGNALS) {
-            *registration = Some(signal_pipe::register(signal, writer.try_clone()?)?);
-        }
-        Ok(signals)
-    }
-
-    /// Writes one byte through the write end, the way a registered handler does.
-    #[cfg(test)]
-    fn trigger(&mut self) -> io::Result<()> {
-        self.writer.write_all(&[SIGNAL_BYTE])
-    }
-
-    /// The registered read end, for the poller to register.
-    fn receiver_mut(&mut self) -> &mut Receiver {
-        &mut self.receiver
-    }
-}
-
-impl Read for ShutdownSignals {
-    /// Reads what the pipe holds.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ErrorKind::WouldBlock`] when no byte is pending, and the
-    /// operating system error when the read fails.
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.receiver.read(buffer)
-    }
-}
-
-impl Drop for ShutdownSignals {
-    fn drop(&mut self) {
-        for registration in self.registrations.iter().flatten() {
-            signal_hook::low_level::unregister(*registration);
-        }
-    }
-}
-
-/// The byte a shutdown signal writes into the pipe.
-#[cfg(test)]
-const SIGNAL_BYTE: u8 = b'X';
 
 /// The poll token that names the connection in slot `index`.
 #[must_use]
