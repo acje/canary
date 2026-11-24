@@ -278,7 +278,7 @@ pub enum ServeError {
     /// Deregistering a source from the poller failed.
     Deregister(ErrorKind),
     /// Reading the shutdown self-pipe failed.
-    Signal(ErrorKind),
+    SignalPipe(ErrorKind),
 }
 
 impl fmt::Display for ServeError {
@@ -288,7 +288,7 @@ impl fmt::Display for ServeError {
             Self::Accept(kind) => ("accept", kind),
             Self::Register(kind) => ("register", kind),
             Self::Deregister(kind) => ("deregister", kind),
-            Self::Signal(kind) => ("signal", kind),
+            Self::SignalPipe(kind) => ("signal", kind),
         };
         write!(formatter, "reactor {step} failed: {kind:?}")
     }
@@ -672,7 +672,7 @@ impl Reactor {
     ///
     /// # Errors
     ///
-    /// Returns [`ServeError::Signal`] when reading the pipe fails.
+    /// Returns [`ServeError::SignalPipe`] when reading the pipe fails.
     fn absorb_shutdown(&mut self) -> Result<(), ServeError> {
         let mut buffer = [0u8; SIGNAL_DRAIN_BYTES];
         for _ in 0..SIGNAL_READS_PER_TURN {
@@ -684,7 +684,7 @@ impl Reactor {
                 {
                     break;
                 }
-                Err(error) => return Err(ServeError::Signal(error.kind())),
+                Err(error) => return Err(ServeError::SignalPipe(error.kind())),
             }
         }
         self.shutting_down = true;
