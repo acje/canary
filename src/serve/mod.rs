@@ -1,13 +1,19 @@
-//! Fixed connection-slot table for the single-owner reactor.
+//! Fixed connection-slot table and single-owner reactor for the service.
 //!
 //! [`slots::Slots`] reserves [`MAX_CONNECTIONS`] slots once at startup and never
 //! grows. Each slot bounds one request head to [`HEAD_BYTES`] and one connection
 //! to [`CONNECTION_DEADLINE`] from acceptance. The table stores connection state
 //! only; rendered reply bytes stay owned by the reactor's reply plan, so a slot
 //! never holds a reply buffer of its own.
+//!
+//! [`reactor::Reactor`] owns the listening socket, the slot table, and the
+//! poller. Every [`reactor::Reactor::turn`] call does a fixed set of bounded
+//! steps, so no turn can block on a socket or on the log sink.
 
+pub mod reactor;
 pub mod slots;
 
+pub use reactor::{Reactor, ServeError, TurnOutcome, TurnWait};
 pub use slots::{Pending, Phase, ReadOutcome, Slots, WriteProgress};
 
 use std::time::Duration;

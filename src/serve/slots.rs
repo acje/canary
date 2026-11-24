@@ -153,6 +153,40 @@ impl Slots {
         Some(&mut self.entries.get_mut(index)?.occupant.as_mut()?.stream)
     }
 
+    /// The head bytes the reading slot `index` can still buffer.
+    ///
+    /// Returns `None` when `index` is not a reading slot.
+    #[must_use]
+    pub fn head_room(&self, index: usize) -> Option<usize> {
+        match &self.entries.get(index)?.occupant.as_ref()?.connection {
+            Connection::Reading { len, .. } => Some(HEAD_BYTES - *len),
+            Connection::Writing { .. } | Connection::Closing => None,
+        }
+    }
+
+    /// The bytes the writing slot `index` has already written.
+    ///
+    /// Returns `None` when `index` is not a writing slot.
+    #[must_use]
+    pub fn cursor(&self, index: usize) -> Option<usize> {
+        match &self.entries.get(index)?.occupant.as_ref()?.connection {
+            Connection::Writing { cursor, .. } => Some(*cursor),
+            Connection::Reading { .. } | Connection::Closing => None,
+        }
+    }
+
+    /// The earliest absolute deadline of any occupied slot.
+    ///
+    /// Returns `None` when no slot is occupied. The scan touches each slot
+    /// once, so it is bounded by [`super::MAX_CONNECTIONS`].
+    #[must_use]
+    pub fn earliest_deadline(&self) -> Option<Instant> {
+        self.entries
+            .iter()
+            .filter_map(|slot| slot.occupant.as_ref().map(|occupant| occupant.expires_at))
+            .min()
+    }
+
     /// Buffers `bytes` into the reading slot `index` and classifies the head.
     ///
     /// Copies at most the remaining head capacity and never grows past
@@ -568,6 +602,38 @@ mod tests {
             1
         );
         assert_eq!(fresh[0], index);
+    }
+
+    #[test]
+    fn occupied_slot_reports_head_room_cursor_and_earliest_deadline() {
+        let fixture = Fixture::new();
+        let mut slots = Slots::new();
+        let accepted = Instant::now();
+        assert_eq!(slots.head_room(0), None);
+        assert_eq!(slots.cursor(0), None);
+        assert_eq!(slots.earliest_deadline(), None);
+        let (stream, _peer) = fixture.stream();
+        let index = slots.acquire(stream, accepted).unwrap();
+        assert_eq!(
+            slots.earliest_deadline(),
+            Some(accepted + CONNECTION_DEADLINE)
+        );
+        assert_eq!(slots.head_room(index), Some(HEAD_BYTES));
+        assert_eq!(slots.cursor(index), None);
+        let head = b"GET / HTTP/1.1\r\n\r\n";
+        let outcome = slots.read_into(index, head).unwrap();
+        let ReadOutcome::Complete(request) = outcome else {
+            panic!("expected a complete request, got {outcome:?}");
+        };
+        assert_eq!(slots.head_room(index), Some(HEAD_BYTES - head.len()));
+        assert!(slots.begin_write(index, Pending::Answer(request), 120));
+        assert_eq!(slots.head_room(index), None);
+        assert_eq!(slots.cursor(index), Some(0));
+        assert_eq!(
+            slots.advance_written(index, 7),
+            Some(WriteProgress::Remaining)
+        );
+        assert_eq!(slots.cursor(index), Some(7));
     }
 
     #[test]
