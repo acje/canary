@@ -147,7 +147,7 @@ impl std::error::Error for ProbeFailure {}
 /// window, and is healthy only when the reply begins with an `HTTP/1.1 200`
 /// status line. The whole probe is therefore bounded by [`CONNECT_TIMEOUT`]
 /// plus [`READ_TIMEOUT`].
-pub fn check() -> ProbeOutcome {
+pub fn run() -> ProbeOutcome {
     check_listen(PortRequest::from_env())
 }
 

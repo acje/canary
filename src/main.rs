@@ -39,7 +39,7 @@ fn process_status(invocation: Invocation) -> i32 {
     match invocation {
         Invocation::Serve => run().code(),
         Invocation::HealthCheck => {
-            let outcome = probe::check();
+            let outcome = probe::run();
             if let ProbeOutcome::Unhealthy(failure) = outcome {
                 eprintln!("canary: health check: {failure}");
             }
