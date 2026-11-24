@@ -49,18 +49,21 @@ jobs:
         run: cargo build --release --locked
 
       # The service is one endpoint with no async runtime, so the normal graph
-      # may name none of the removed stack and must stay within five packages
-      # including canary itself. The checks are explicit branches because a
+      # may name none of the removed stack and must be exactly the six packages
+      # canary, errno, libc, mio, signal-hook, signal-hook-registry; an added or
+      # a dropped package fails. The checks are explicit branches because a
       # negated pipeline does not trip errexit.
       - name: Dependency graph
         run: |
+          set -o pipefail
           graph="$(cargo tree -e normal --prefix none --format '{p}')"
           if grep -Eq '^(actix-web|tokio|env_logger|log) ' <<<"$graph"; then
             echo "a removed dependency is in the normal graph" >&2
             exit 1
           fi
-          packages="$(printf '%s\n' "$graph" | sort -u | wc -l)"
-          if [ "$packages" -gt 5 ]; then
-            echo "the normal graph holds $packages packages, at most 5 allowed" >&2
+          packages="$(printf '%s\n' "$graph" | awk '{print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+          expected="canary errno libc mio signal-hook signal-hook-registry"
+          if [ "$packages" != "$expected" ]; then
+            echo "the normal graph is [$packages], expected [$expected]" >&2
             exit 1
           fi
