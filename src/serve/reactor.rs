@@ -1283,14 +1283,13 @@ mod tests {
         assert_eq!(TOKEN_LISTENER, 0);
         assert_eq!(TOKEN_SIGNAL, 1);
         assert_eq!(connection_token(0), Token(2));
-        assert_eq!(
-            connection_token(MAX_CONNECTIONS - 1),
-            Token(MAX_CONNECTIONS + 1)
-        );
-        assert_eq!(connection_slot(Token(TOKEN_LISTENER)), None);
-        assert_eq!(connection_slot(Token(TOKEN_SIGNAL)), None);
-        assert_eq!(connection_slot(connection_token(7)), Some(7));
-        assert_eq!(connection_slot(Token(MAX_CONNECTIONS + 2)), None);
+        assert_eq!(connection_token(7), Token(9));
+        assert_eq!(connection_token(63), Token(65));
+        assert_eq!(connection_slot(Token(9)), Some(7));
+        assert_eq!(connection_slot(Token(65)), Some(63));
+        assert_eq!(connection_slot(Token(66)), None);
+        assert_eq!(connection_slot(Token(0)), None);
+        assert_eq!(connection_slot(Token(1)), None);
     }
 
     #[test]
