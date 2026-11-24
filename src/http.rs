@@ -274,12 +274,10 @@ const fn classify_target(token: &[u8]) -> Target {
     }
 }
 
-/// A `HEAD` reply: the header block alone, with the body length the matching
-/// `GET` reply declares.
+/// A `HEAD` reply: the header block alone.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Head<'a> {
     head: &'a [u8],
-    body_len: usize,
 }
 
 impl<'a> Head<'a> {
@@ -287,12 +285,6 @@ impl<'a> Head<'a> {
     #[must_use]
     pub fn head(self) -> &'a [u8] {
         self.head
-    }
-
-    /// The body length declared by `Content-Length`.
-    #[must_use]
-    pub fn body_len(self) -> usize {
-        self.body_len
     }
 }
 
@@ -410,7 +402,6 @@ impl Wire {
     fn head(&self) -> Head<'_> {
         Head {
             head: &self.bytes[..self.head_len],
-            body_len: self.len - self.head_len,
         }
     }
 }
@@ -812,7 +803,7 @@ mod tests {
         let plan = plan();
         let head = plan.ok_head();
         assert_eq!(head.head(), OK_HEAD);
-        assert_eq!(head.body_len(), 25);
+        assert_eq!(declared_body_len(head.head()), 25);
     }
 
     #[test]
@@ -851,7 +842,7 @@ mod tests {
         ] {
             assert_eq!(declared_body_len(reply), body_of(reply).len());
         }
-        assert_eq!(plan.ok_head().body_len(), 25);
+        assert_eq!(declared_body_len(plan.ok_head().head()), 25);
     }
 
     #[test]
@@ -892,7 +883,7 @@ mod tests {
             panic!("expected a head-only reply, got {reply:?}");
         };
         assert_eq!(head.head(), &NOT_FOUND_REPLY[..head_len]);
-        assert_eq!(head.body_len(), 11);
+        assert_eq!(declared_body_len(head.head()), 11);
     }
 
     #[test]
