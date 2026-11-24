@@ -186,14 +186,14 @@ impl FilterParse {
     /// An absent variable yields [`LogFilter::Info`] with no notice, because an
     /// absent variable is the normal boot and implies no degradation. An accepted
     /// value yields its filter and no notice. A supplied but unrecognised value
-    /// yields [`LogFilter::Info`] together with [`Record::FilterDefaulted`], so
+    /// yields [`LogFilter::Info`] together with [`Record::FilterUnrecognised`], so
     /// choosing the filter and emitting the notice are one decision.
     #[must_use]
     pub const fn into_filter_and_notice(self) -> (LogFilter, Option<Record>) {
         match self.0 {
             FilterParseKind::Absent => (LogFilter::Info, None),
             FilterParseKind::Accepted(filter) => (filter, None),
-            FilterParseKind::Unrecognized => (LogFilter::Info, Some(Record::FilterDefaulted)),
+            FilterParseKind::Unrecognized => (LogFilter::Info, Some(Record::FilterUnrecognised)),
         }
     }
 }
@@ -224,9 +224,9 @@ pub enum Record {
         /// Log records dropped since startup.
         dropped: u64,
     },
-    /// `RUST_LOG` supplied a value that named no severity, so the filter
-    /// defaulted to info.
-    FilterDefaulted,
+    /// `RUST_LOG` supplied a value that named no severity, so the filter fell
+    /// back to info.
+    FilterUnrecognised,
     /// A drain the sink failed, reported once per failure episode.
     SinkFailure {
         /// The failed drains counted since startup.
@@ -240,7 +240,7 @@ impl Record {
     pub const fn level(self) -> Level {
         match self {
             Self::Startup { .. } | Self::Tick { .. } | Self::Shutdown { .. } => Level::Info,
-            Self::FilterDefaulted => Level::Warn,
+            Self::FilterUnrecognised => Level::Warn,
             Self::SinkFailure { .. } => Level::Error,
         }
     }
@@ -265,7 +265,7 @@ impl Record {
                 slot,
                 "level={level} kind=shutdown served={served} rejected={rejected} dropped={dropped}\r\n"
             ),
-            Self::FilterDefaulted => write!(slot, "level={level} kind=filter_default\r\n"),
+            Self::FilterUnrecognised => write!(slot, "level={level} kind=filter_default\r\n"),
             Self::SinkFailure { failures } => {
                 write!(
                     slot,
@@ -580,10 +580,10 @@ mod tests {
     }
 
     #[test]
-    fn filter_defaulted_record_renders_exact_bytes() {
+    fn filter_unrecognised_record_renders_exact_bytes() {
         let mut store = store();
         assert_eq!(
-            store.enqueue(LogFilter::Info, Record::FilterDefaulted),
+            store.enqueue(LogFilter::Info, Record::FilterUnrecognised),
             QueueOutcome::Queued
         );
         assert_eq!(
@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn record_levels_are_info_warn_or_error() {
-        assert_eq!(Record::FilterDefaulted.level(), Level::Warn);
+        assert_eq!(Record::FilterUnrecognised.level(), Level::Warn);
         assert_eq!(Record::SinkFailure { failures: 1 }.level(), Level::Error);
         assert_eq!(
             Record::Startup {
@@ -706,7 +706,7 @@ mod tests {
                 rejected: 0,
                 dropped: 0,
             },
-            Record::FilterDefaulted,
+            Record::FilterUnrecognised,
         ];
         for record in lower_levels {
             assert_eq!(
@@ -761,7 +761,7 @@ mod tests {
         );
         assert_eq!(
             LogFilter::parse(Some("debug")).into_filter_and_notice(),
-            (LogFilter::Info, Some(Record::FilterDefaulted))
+            (LogFilter::Info, Some(Record::FilterUnrecognised))
         );
     }
 
@@ -778,7 +778,7 @@ mod tests {
         for raw in ["", "debug", "trace", "warning", "info,debug", "="] {
             assert_eq!(
                 LogFilter::parse(Some(raw)).into_filter_and_notice(),
-                (LogFilter::Info, Some(Record::FilterDefaulted)),
+                (LogFilter::Info, Some(Record::FilterUnrecognised)),
                 "raw {raw:?}"
             );
         }
@@ -809,7 +809,7 @@ mod tests {
         };
         assert_eq!(store.enqueue(LogFilter::Warn, tick), QueueOutcome::Filtered);
         assert_eq!(
-            store.enqueue(LogFilter::Warn, Record::FilterDefaulted),
+            store.enqueue(LogFilter::Warn, Record::FilterUnrecognised),
             QueueOutcome::Queued
         );
         assert_eq!(
@@ -822,7 +822,7 @@ mod tests {
     fn off_filter_suppresses_every_level() {
         let mut store = store();
         assert_eq!(
-            store.enqueue(LogFilter::Off, Record::FilterDefaulted),
+            store.enqueue(LogFilter::Off, Record::FilterUnrecognised),
             QueueOutcome::Filtered
         );
         assert_eq!(
@@ -916,7 +916,7 @@ mod tests {
         };
         assert_eq!(store.enqueue(LogFilter::Info, first), QueueOutcome::Queued);
         assert_eq!(
-            store.enqueue(LogFilter::Info, Record::FilterDefaulted),
+            store.enqueue(LogFilter::Info, Record::FilterUnrecognised),
             QueueOutcome::Queued
         );
         let expected_first = b"level=info kind=tick served=1 rejected=2 dropped=3\r\n";
@@ -942,7 +942,7 @@ mod tests {
         assert_eq!(store.consume_front(0), ConsumeOutcome::Advanced);
         assert!(store.is_empty());
         assert_eq!(
-            store.enqueue(LogFilter::Info, Record::FilterDefaulted),
+            store.enqueue(LogFilter::Info, Record::FilterUnrecognised),
             QueueOutcome::Queued
         );
         let unchanged = front(&store);

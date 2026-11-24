@@ -1629,7 +1629,7 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .enqueue(LogFilter::Info, Record::FilterDefaulted),
+                .enqueue(LogFilter::Info, Record::FilterUnrecognised),
             QueueOutcome::Queued
         );
         let outcome = {
@@ -1677,7 +1677,7 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .enqueue(LogFilter::Info, Record::FilterDefaulted),
+                .enqueue(LogFilter::Info, Record::FilterUnrecognised),
             QueueOutcome::Queued
         );
         harness.now = Instant::now();
@@ -1769,7 +1769,7 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .enqueue(LogFilter::Info, Record::FilterDefaulted),
+                .enqueue(LogFilter::Info, Record::FilterUnrecognised),
             QueueOutcome::Queued
         );
         let mut sink = FailingSink {

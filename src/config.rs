@@ -13,7 +13,7 @@ use crate::port::{ListenPort, PortError};
 /// bounded and non-fatal: [`LogFilter::parse`] recognises exactly `off`, `error`,
 /// `warn`, and `info`, defaults an absent value to [`LogFilter::Info`] with no
 /// notice, and defaults any other supplied value to [`LogFilter::Info`] together
-/// with [`Record::FilterDefaulted`], which the plan carries as its
+/// with [`Record::FilterUnrecognised`], which the plan carries as its
 /// [`RuntimePlan::notice`]. Only an absent variable is silent: a supplied value
 /// that names no severity earns the notice, and a value that is not valid
 /// Unicode text cannot name one, so it earns the notice too.
@@ -128,14 +128,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.filter, LogFilter::Info);
-        assert_eq!(plan.notice, Some(Record::FilterDefaulted));
+        assert_eq!(plan.notice, Some(Record::FilterUnrecognised));
     }
 
     #[test]
     fn an_unrecognised_rust_log_defaults_the_filter_with_one_warn_notice() {
         let plan = RuntimePlan::from_inputs(Ok(ListenPort::Ephemeral), Some("garbage")).unwrap();
         assert_eq!(plan.filter, LogFilter::Info);
-        assert_eq!(plan.notice, Some(Record::FilterDefaulted));
+        assert_eq!(plan.notice, Some(Record::FilterUnrecognised));
         assert_eq!(plan.notice.map(Record::level), Some(Level::Warn));
     }
 
