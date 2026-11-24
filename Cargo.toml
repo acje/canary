@@ -21,5 +21,5 @@ unimplemented = "deny"
 
 [dependencies]
 libc = "=0.2.191"
-mio = { version = "=1.2.4", default-features = false, features = ["net", "os-poll", "os-ext"] }
+mio = { version = "=1.2.5", default-features = false, features = ["net", "os-poll", "os-ext"] }
 signal-hook = { version = "=0.4.6", default-features = false }
