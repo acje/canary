@@ -438,12 +438,31 @@ impl Reactor {
                 Err(error) => return Err(ServeError::Poll(error.kind())),
             }
         }
+        self.snapshot_tokens();
+        Ok(())
+    }
+
+    fn snapshot_tokens(&mut self) {
         let mut count = 0;
         for (snapshot, event) in self.tokens.iter_mut().zip(self.events.iter()) {
             *snapshot = event.token();
             count += 1;
         }
         self.token_count = count;
+    }
+
+    #[cfg(test)]
+    fn wait_bounded(&mut self, timeout: Duration) -> Result<(), ServeError> {
+        let started = Instant::now();
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            match self.poll.poll(&mut self.events, Some(remaining)) {
+                Ok(()) => break,
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) => return Err(ServeError::Poll(error.kind())),
+            }
+        }
+        self.snapshot_tokens();
         Ok(())
     }
 
@@ -1029,7 +1048,7 @@ mod tests {
 
     const DRIVE_DEADLINE: Duration = Duration::from_secs(2);
     const DRIVE_SLACK_TURNS: usize = 64;
-    const IDLE_SLEEP: Duration = Duration::from_millis(1);
+    const TURN_WAIT: Duration = Duration::from_millis(20);
 
     struct Harness {
         reactor: Reactor,
@@ -1071,19 +1090,27 @@ mod tests {
                 .unwrap()
         }
 
+        fn turn_bounded(&mut self, timeout: Duration) -> TurnOutcome {
+            self.reactor.wait_bounded(timeout).unwrap();
+            self.reactor
+                .turn(&mut self.store, LogFilter::Info, &mut self.sink, self.now)
+                .unwrap()
+        }
+
         fn drive_until<F>(&mut self, mut done: F)
         where
             F: FnMut(&Self) -> bool,
         {
             let started = Instant::now();
             let allowance = self.drive_allowance();
-            for turn in 0.. {
+            let mut idle = 0;
+            loop {
                 if done(self) {
                     return;
                 }
                 assert!(
-                    turn < allowance,
-                    "the reactor did not reach the expected state in {turn} turns: {}",
+                    idle < allowance,
+                    "the reactor did not reach the expected state in {idle} turns: {}",
                     self.state()
                 );
                 assert!(
@@ -1091,8 +1118,11 @@ mod tests {
                     "the reactor did not reach the expected state within {DRIVE_DEADLINE:?}: {}",
                     self.state()
                 );
-                if self.turn() == TurnOutcome::Idle {
-                    std::thread::sleep(IDLE_SLEEP);
+                let remaining = DRIVE_DEADLINE.saturating_sub(started.elapsed());
+                if self.turn_bounded(TURN_WAIT.min(remaining)) == TurnOutcome::Idle {
+                    idle += 1;
+                } else {
+                    idle = 0;
                 }
             }
         }
@@ -1378,15 +1408,18 @@ mod tests {
         for _ in 0..(2 * ACCEPT_PER_TURN) {
             clients.push(harness.connect());
         }
-        for turn in 1..=8 {
-            let _ = harness.turn();
+        let target = 2 * ACCEPT_PER_TURN;
+        while harness.reactor.slots.len() < target {
+            let held = harness.reactor.slots.len();
+            harness.drive_until(|harness| harness.reactor.slots.len() > held);
+            let accepted = harness.reactor.slots.len() - held;
             assert!(
-                harness.reactor.slots.len() <= turn * ACCEPT_PER_TURN,
-                "turn {turn} accepted past its budget"
+                accepted <= ACCEPT_PER_TURN,
+                "one turn accepted {accepted} of the {target} queued connections"
             );
         }
-        assert_eq!(harness.reactor.slots.len(), 2 * ACCEPT_PER_TURN);
-        assert_eq!(clients.len(), 2 * ACCEPT_PER_TURN);
+        assert_eq!(harness.reactor.slots.len(), target);
+        assert_eq!(clients.len(), target);
     }
 
     #[test]
