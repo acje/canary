@@ -37,7 +37,7 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::low_level::pipe as signal_pipe;
 
 use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, ParseOutcome, Reply, ResponsePlan};
-use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DRAIN, LOG_RETRY};
+use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DEADLINE, LOG_RETRY};
 use crate::log::{Counters, LogFilter, LogQueue, QueueOutcome, Record};
 
 use super::slots::{ConnectionPhase, ReplyChoice, Slots, WriteProgress};
@@ -628,7 +628,7 @@ impl Reactor {
     ///
     /// Queues exactly one [`Record::Shutdown`] carrying the counters and the drop
     /// count sampled at this instant, then runs exactly one
-    /// [`sink::drain_until`] under [`FLUSH_DRAIN`]: the drain repeats its
+    /// [`sink::drain_until`] under [`FLUSH_DEADLINE`]: the drain repeats its
     /// bounded turn while it progresses and the deadline has not passed, so the
     /// flush is bounded even against a reader that never drains. The sink's
     /// failure latch does not suppress it — the last attempt is the one worth
@@ -656,7 +656,7 @@ impl Reactor {
             dropped: store.dropped(),
         });
         let record = store.enqueue(filter, record);
-        let drain = sink::drain_until(store, sink, DrainBudget::DEFAULT, now + FLUSH_DRAIN);
+        let drain = sink::drain_until(store, sink, DrainBudget::DEFAULT, now + FLUSH_DEADLINE);
         ShutdownReport { record, drain }
     }
 

@@ -14,7 +14,7 @@ use mio::net::TcpListener;
 use canary::config::RuntimePlan;
 use canary::exit::ExitCode;
 use canary::http::ResponsePlan;
-use canary::log::sink::{self, DrainBudget, FLUSH_DRAIN, NonblockingStdout};
+use canary::log::sink::{self, DrainBudget, FLUSH_DEADLINE, NonblockingStdout};
 use canary::log::{LogQueue, QueueOutcome, Record};
 use canary::probe::{self, Invocation, ProbeOutcome};
 use canary::serve::{Reactor, ShutdownReport, ShutdownSignals, TurnOutcome, TurnWait};
@@ -117,7 +117,7 @@ fn run() -> ExitCode {
         &mut store,
         &mut sink,
         DrainBudget::DEFAULT,
-        Instant::now() + FLUSH_DRAIN,
+        Instant::now() + FLUSH_DEADLINE,
     );
     if let Some(notice) = plan.notice {
         let _ = store.enqueue(plan.filter, notice);

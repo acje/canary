@@ -4,7 +4,7 @@
 //! blocks, never allocates, and never grows. Whatever the operating system
 //! refuses stays queued and is offered again on a later serving turn, so a slow
 //! reader costs throughput and never a record that was accepted into the queue
-//! while the process keeps serving: only the final [`FLUSH_DRAIN`] flush can
+//! while the process keeps serving: only the final [`FLUSH_DEADLINE`] flush can
 //! abandon what a reader never drained.
 //!
 //! [`NonblockingStdout`] owns an unbuffered handle to the inherited standard
@@ -53,10 +53,9 @@ pub const LOG_RETRY: Duration = Duration::from_secs(1);
 /// The wall-clock bound on each one-shot flush of the process.
 ///
 /// Owner: the process's two flush points (M06/M07), which pass
-/// `Instant::now() + FLUSH_DRAIN` as the deadline of their [`drain_until`]
-/// calls. Scope: the startup drain that releases the boot line before the
-/// listener is polled, and the final drain that releases whatever the shutdown
-/// left queued. Units: wall-clock time. Limit: 250 ms, which is enough for a
+/// `Instant::now() + FLUSH_DEADLINE` to their [`drain_until`] calls. Scope: the
+/// startup drain that releases the boot line before the listener is polled, and
+/// the final drain that releases whatever the shutdown left queued. Units: wall-clock time. Limit: 250 ms, which is enough for a
 /// reader that is still consuming and short enough that startup and shutdown
 /// stay responsive. Exhaustion: the drain stops at the deadline and the
 /// remainder stays queued; at startup the serving turns offer it again, and at
@@ -64,7 +63,7 @@ pub const LOG_RETRY: Duration = Duration::from_secs(1);
 /// queue refusals only, so a leftover record never advances it. The returned
 /// [`DrainOutcome`] reports the short flush. Evidence:
 /// `drain_until_with_an_elapsed_deadline_performs_exactly_one_drain`.
-pub const FLUSH_DRAIN: Duration = Duration::from_millis(250);
+pub const FLUSH_DEADLINE: Duration = Duration::from_millis(250);
 
 /// The result of one [`drain`] turn.
 #[must_use]
@@ -265,7 +264,7 @@ impl Write for NonblockingStdout {
 #[cfg(test)]
 mod tests {
     use super::{
-        DrainBudget, DrainOutcome, FLUSH_DRAIN, NonblockingStdout, SINK_MAX_BYTES, SINK_MAX_OPS,
+        DrainBudget, DrainOutcome, FLUSH_DEADLINE, NonblockingStdout, SINK_MAX_BYTES, SINK_MAX_OPS,
         drain, drain_until,
     };
     use crate::log::{Counters, LogFilter, LogQueue, QueueOutcome, Record};
@@ -612,7 +611,7 @@ mod tests {
             Step::Accepted(record_len),
             Step::Accepted(record_len),
         ]);
-        let deadline = Instant::now() + FLUSH_DRAIN;
+        let deadline = Instant::now() + FLUSH_DEADLINE;
         assert_eq!(
             drain_until(&mut store, &mut sink, single_turn(), deadline),
             DrainOutcome::Idle
@@ -628,7 +627,7 @@ mod tests {
         let queued = store.len();
         let expected_bytes = queued * record_len;
         let mut sink = OneByteWriter::new();
-        let deadline = Instant::now() + FLUSH_DRAIN;
+        let deadline = Instant::now() + FLUSH_DEADLINE;
         assert_eq!(
             drain_until(&mut store, &mut sink, DrainBudget::DEFAULT, deadline),
             DrainOutcome::Idle
