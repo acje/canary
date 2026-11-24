@@ -96,15 +96,6 @@ impl ProbeOutcome {
     }
 }
 
-impl fmt::Display for ProbeOutcome {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Healthy => formatter.write_str("healthy"),
-            Self::Unhealthy(failure) => write!(formatter, "unhealthy: {failure}"),
-        }
-    }
-}
-
 /// Why a probe could not establish that the listener is healthy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProbeFailure {
@@ -306,7 +297,7 @@ mod tests {
                 outcome,
                 ProbeOutcome::Unhealthy(ProbeFailure::Read(_) | ProbeFailure::MalformedStatus)
             ),
-            "{outcome}"
+            "{outcome:?}"
         );
         assert!(
             elapsed < READ_TIMEOUT * 2,
@@ -351,12 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn display_names_the_outcome_and_the_failure() {
-        assert_eq!(ProbeOutcome::Healthy.to_string(), "healthy");
-        assert_eq!(
-            ProbeOutcome::Unhealthy(ProbeFailure::MalformedStatus).to_string(),
-            "unhealthy: the reply does not begin with an HTTP/1.1 200 status line"
-        );
+    fn display_names_the_failure() {
         assert_eq!(
             ProbeFailure::Connect(io::ErrorKind::ConnectionRefused).to_string(),
             "cannot connect to the listener: connection refused"
