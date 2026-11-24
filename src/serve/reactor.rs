@@ -999,7 +999,7 @@ impl Reactor {
                 self.log_retry_at = Some(now + LOG_RETRY);
                 false
             }
-            DrainOutcome::Progress { .. } => {
+            DrainOutcome::Moved { .. } => {
                 self.recover_sink();
                 self.log_retry_at = (!store.is_empty()).then_some(now);
                 true

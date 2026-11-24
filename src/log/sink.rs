@@ -28,7 +28,7 @@ use super::{ConsumeOutcome, LogQueue};
 /// Units: [`std::io::Write::write`] attempts, including retries after
 /// [`ErrorKind::Interrupted`]. Limit: 16, which bounds a turn at sixteen
 /// records even when the sink accepts a whole slot each time. Exhaustion:
-/// [`drain`] returns [`DrainOutcome::Progress`] and the reactor retries after
+/// [`drain`] returns [`DrainOutcome::Moved`] and the reactor retries after
 /// [`LOG_RETRY`]. Evidence: `max_ops_budget_stops_early`.
 pub const SINK_MAX_OPS: usize = 16;
 
@@ -37,7 +37,7 @@ pub const SINK_MAX_OPS: usize = 16;
 /// Owner: this sink. Scope: one turn of the single-owner reactor, aggregate
 /// across records. Units: bytes removed from the store. Limit: 64 KiB, a
 /// quarter of the 256 KiB ring, so one turn cannot monopolise the reactor.
-/// Exhaustion: [`drain`] returns [`DrainOutcome::Progress`] and the remainder
+/// Exhaustion: [`drain`] returns [`DrainOutcome::Moved`] and the remainder
 /// stays queued. Evidence: `max_bytes_budget_stops_early`.
 pub const SINK_MAX_BYTES: usize = 64 * 1024;
 
@@ -73,7 +73,7 @@ pub enum DrainOutcome {
     /// The queue held nothing to offer.
     Idle,
     /// The turn moved records or bytes out of the queue.
-    Progress {
+    Moved {
         /// The records removed from the queue this turn.
         records: usize,
         /// The bytes removed from the queue this turn.
@@ -84,7 +84,7 @@ pub enum DrainOutcome {
     /// The sink accepted nothing further without reporting an error, or the
     /// budget admitted no work. A record the sink refused and a record the budget
     /// never offered both stay at the front, and a turn that wrote part of a
-    /// record before the sink refused more reports [`DrainOutcome::Progress`]
+    /// record before the sink refused more reports [`DrainOutcome::Moved`]
     /// with the bytes that did reach the kernel.
     Stalled,
     /// The sink reported an error; the record it was offered is still queued.
@@ -115,9 +115,9 @@ impl DrainBudget {
 ///
 /// The turn re-reads [`LogQueue::unwritten_front`] before every attempt and
 /// offers the front record once, so a short write resumes where it stopped.
-/// [`DrainOutcome::Progress`] counts what the store actually released, never
+/// [`DrainOutcome::Moved`] counts what the store actually released, never
 /// what the sink was offered. Bytes a turn released before a full sink refused
-/// more are reported as [`DrainOutcome::Progress`] and the remainder stays at
+/// more are reported as [`DrainOutcome::Moved`] and the remainder stays at
 /// the front; a turn that reached the kernel with nothing reports
 /// [`DrainOutcome::Stalled`], and a hard error returns [`DrainOutcome::Failed`]
 /// with the offered record still queued.
@@ -137,14 +137,14 @@ pub fn drain(store: &mut LogQueue, sink: &mut impl Write, budget: DrainBudget) -
             return if records == 0 {
                 DrainOutcome::Idle
             } else {
-                DrainOutcome::Progress { records, bytes }
+                DrainOutcome::Moved { records, bytes }
             };
         };
         if ops >= budget.max_ops || bytes >= budget.max_bytes {
             return if records == 0 && bytes == 0 {
                 DrainOutcome::Stalled
             } else {
-                DrainOutcome::Progress { records, bytes }
+                DrainOutcome::Moved { records, bytes }
             };
         }
         let offer = &front[..front.len().min(budget.max_bytes - bytes)];
@@ -177,7 +177,7 @@ pub fn drain(store: &mut LogQueue, sink: &mut impl Write, budget: DrainBudget) -
     if records == 0 && bytes == 0 {
         DrainOutcome::Stalled
     } else {
-        DrainOutcome::Progress { records, bytes }
+        DrainOutcome::Moved { records, bytes }
     }
 }
 
@@ -193,7 +193,7 @@ pub fn drain_until(
 ) -> DrainOutcome {
     loop {
         let outcome = drain(store, sink, budget);
-        if !matches!(outcome, DrainOutcome::Progress { .. }) || Instant::now() >= deadline {
+        if !matches!(outcome, DrainOutcome::Moved { .. }) || Instant::now() >= deadline {
             return outcome;
         }
     }
@@ -381,7 +381,7 @@ mod tests {
         let mut sink = FakeWriter::new([Step::Accepted(split), Step::Accepted(record_len - split)]);
         assert_eq!(
             drain(&mut store, &mut sink, single_turn()),
-            DrainOutcome::Progress {
+            DrainOutcome::Moved {
                 records: 0,
                 bytes: split
             }
@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(front_len(&store), record_len - split);
         assert_eq!(
             drain(&mut store, &mut sink, single_turn()),
-            DrainOutcome::Progress {
+            DrainOutcome::Moved {
                 records: 1,
                 bytes: record_len - split
             }
@@ -439,7 +439,7 @@ mod tests {
         ]);
         assert_eq!(
             drain(&mut store, &mut sink, DrainBudget::DEFAULT),
-            DrainOutcome::Progress {
+            DrainOutcome::Moved {
                 records: 1,
                 bytes: record_len
             }
@@ -509,7 +509,7 @@ mod tests {
         ]);
         assert_eq!(
             drain(&mut store, &mut sink, DrainBudget::DEFAULT),
-            DrainOutcome::Progress {
+            DrainOutcome::Moved {
                 records: 1,
                 bytes: record_len
             }
@@ -529,7 +529,7 @@ mod tests {
         };
         assert_eq!(
             drain(&mut store, &mut sink, budget),
-            DrainOutcome::Progress {
+            DrainOutcome::Moved {
                 records: 2,
                 bytes: 2 * record_len
             }
@@ -551,7 +551,7 @@ mod tests {
         };
         assert_eq!(
             drain(&mut store, &mut sink, budget),
-            DrainOutcome::Progress {
+            DrainOutcome::Moved {
                 records: 1,
                 bytes: record_len + tail
             }
@@ -594,7 +594,7 @@ mod tests {
         let deadline = Instant::now();
         assert_eq!(
             drain_until(&mut store, &mut sink, single_turn(), deadline),
-            DrainOutcome::Progress {
+            DrainOutcome::Moved {
                 records: 1,
                 bytes: record_len
             }
