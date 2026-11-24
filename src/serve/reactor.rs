@@ -301,9 +301,9 @@ impl std::error::Error for ServeError {}
 struct SinkHealth {
     /// The kind of the drain failure the reactor has not yet recovered from.
     failed: Option<ErrorKind>,
-    /// Whether this failure episode has already attempted its record; a filtered
+    /// Whether this failure episode has already notified the queue; a filtered
     /// attempt counts as handled.
-    recorded: bool,
+    failure_notified: bool,
     /// The failed drains counted since startup.
     failures: u64,
 }
@@ -985,8 +985,8 @@ impl Reactor {
                 self.sink.failed = Some(kind);
                 self.sink.failures = self.sink.failures.saturating_add(1);
                 self.log_retry_at = Some(now + LOG_RETRY);
-                if !self.sink.recorded {
-                    self.sink.recorded = store.enqueue(
+                if !self.sink.failure_notified {
+                    self.sink.failure_notified = store.enqueue(
                         filter,
                         Record::SinkFailure {
                             failures: self.sink.failures,
@@ -1024,7 +1024,7 @@ impl Reactor {
     /// Clears the sink's failure latch after a drain the sink took.
     fn recover_sink(&mut self) {
         self.sink.failed = None;
-        self.sink.recorded = false;
+        self.sink.failure_notified = false;
     }
 
     /// Registers or deregisters the listener so `registered` holds afterwards.
@@ -1843,7 +1843,7 @@ mod tests {
         );
         assert!(harness.store.is_empty());
         assert!(harness.reactor.sink.failed.is_none());
-        assert!(!harness.reactor.sink.recorded);
+        assert!(!harness.reactor.sink.failure_notified);
         assert_eq!(harness.reactor.next_deadline(harness.now), None);
         assert_eq!(
             recovered.as_slice(),
