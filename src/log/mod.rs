@@ -20,8 +20,11 @@
 //!
 //! [`LogFilter::allows`] is the only filter decision. Startup, tick, and
 //! shutdown records are [`Level::Info`]; the filter-defaulted notice is
-//! [`Level::Warn`]; a sink-failure record joins it at [`Level::Warn`] in the
-//! next increment.
+//! [`Level::Warn`]; a sink-failure record joins it at [`Level::Warn`] when the
+//! reactor owns retry scheduling. Records leave the queue through
+//! [`sink::drain`], which never blocks and never allocates.
+
+pub mod sink;
 
 use std::fmt::{self, Write as _};
 use std::net::SocketAddr;
@@ -116,19 +119,19 @@ impl LogFilter {
     #[must_use]
     pub fn parse(raw: Option<&str>) -> FilterParse {
         let Some(raw) = raw else {
-            return FilterParse::Defaulted;
+            return FilterParse(FilterParseKind::Defaulted);
         };
         let value = raw.trim_matches(|character: char| character.is_ascii_whitespace());
         if value.eq_ignore_ascii_case("off") {
-            FilterParse::Accepted(Self::Off)
+            FilterParse(FilterParseKind::Accepted(Self::Off))
         } else if value.eq_ignore_ascii_case("error") {
-            FilterParse::Accepted(Self::Error)
+            FilterParse(FilterParseKind::Accepted(Self::Error))
         } else if value.eq_ignore_ascii_case("warn") {
-            FilterParse::Accepted(Self::Warn)
+            FilterParse(FilterParseKind::Accepted(Self::Warn))
         } else if value.eq_ignore_ascii_case("info") {
-            FilterParse::Accepted(Self::Info)
+            FilterParse(FilterParseKind::Accepted(Self::Info))
         } else {
-            FilterParse::Defaulted
+            FilterParse(FilterParseKind::Defaulted)
         }
     }
 
@@ -145,12 +148,17 @@ impl LogFilter {
 }
 
 /// The outcome of interpreting a raw `RUST_LOG` value.
+///
+/// The interpretation behind this value is private: the only way to obtain a
+/// filter is [`FilterParse::into_filter_and_notice`], so a defaulted filter
+/// cannot be applied without also recording its notice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FilterParse {
-    /// A recognised name selected this filter explicitly.
+pub struct FilterParse(FilterParseKind);
+
+/// The private interpretation behind [`FilterParse`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FilterParseKind {
     Accepted(LogFilter),
-    /// The value was absent or unrecognised, so the filter defaults to
-    /// [`LogFilter::Info`] and [`Record::FilterDefaulted`] must be recorded.
     Defaulted,
 }
 
@@ -162,9 +170,9 @@ impl FilterParse {
     /// choosing the filter and emitting the notice are one decision.
     #[must_use]
     pub const fn into_filter_and_notice(self) -> (LogFilter, Option<Record>) {
-        match self {
-            Self::Accepted(filter) => (filter, None),
-            Self::Defaulted => (LogFilter::Info, Some(Record::FilterDefaulted)),
+        match self.0 {
+            FilterParseKind::Accepted(filter) => (filter, None),
+            FilterParseKind::Defaulted => (LogFilter::Info, Some(Record::FilterDefaulted)),
         }
     }
 }
@@ -361,6 +369,11 @@ impl LogStore {
     /// Consuming zero bytes is a no-op success. Returns
     /// [`ConsumeOutcome::Rejected`], changing nothing, when `written` exceeds
     /// the remaining bytes of the front record.
+    ///
+    /// An empty queue always has a zero `front_offset`, because the consume
+    /// that removes the last record resets it. The `len == 0` guard below
+    /// therefore cannot observe a stale cursor, and `lengths[head] -
+    /// front_offset` cannot underflow.
     pub fn consume_front(&mut self, written: usize) -> ConsumeOutcome {
         if self.len == 0 {
             return if written == 0 {
@@ -617,30 +630,21 @@ mod tests {
 
     #[test]
     fn filter_parse_recognises_exact_names_case_insensitively() {
-        assert_eq!(
-            LogFilter::parse(Some("off")),
-            FilterParse::Accepted(LogFilter::Off)
-        );
-        assert_eq!(
-            LogFilter::parse(Some("error")),
-            FilterParse::Accepted(LogFilter::Error)
-        );
-        assert_eq!(
-            LogFilter::parse(Some("warn")),
-            FilterParse::Accepted(LogFilter::Warn)
-        );
-        assert_eq!(
-            LogFilter::parse(Some("info")),
-            FilterParse::Accepted(LogFilter::Info)
-        );
-        assert_eq!(
-            LogFilter::parse(Some("  WaRn\t")),
-            FilterParse::Accepted(LogFilter::Warn)
-        );
-        assert_eq!(
-            LogFilter::parse(Some("INFO")),
-            FilterParse::Accepted(LogFilter::Info)
-        );
+        let cases = [
+            ("off", LogFilter::Off),
+            ("error", LogFilter::Error),
+            ("warn", LogFilter::Warn),
+            ("info", LogFilter::Info),
+            ("  WaRn\t", LogFilter::Warn),
+            ("INFO", LogFilter::Info),
+        ];
+        for (raw, filter) in cases {
+            assert_eq!(
+                LogFilter::parse(Some(raw)).into_filter_and_notice(),
+                (filter, None),
+                "raw {raw:?}"
+            );
+        }
     }
 
     #[test]
@@ -674,11 +678,35 @@ mod tests {
             Some("info,debug"),
             Some("="),
         ] {
-            let parsed = LogFilter::parse(raw);
-            assert_eq!(parsed, FilterParse::Defaulted, "raw {raw:?}");
             assert_eq!(
-                parsed.into_filter_and_notice(),
+                LogFilter::parse(raw).into_filter_and_notice(),
                 (LogFilter::Info, Some(Record::FilterDefaulted)),
+                "raw {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn filter_parse_cannot_yield_a_filter_without_its_notice() {
+        let parsed: FilterParse = LogFilter::parse(Some("debug"));
+        assert_eq!(
+            parsed.into_filter_and_notice(),
+            (LogFilter::Info, Some(Record::FilterDefaulted))
+        );
+        for raw in [None, Some(""), Some("debug"), Some("info,debug")] {
+            let (filter, notice) = LogFilter::parse(raw).into_filter_and_notice();
+            assert_eq!(filter, LogFilter::Info, "raw {raw:?}");
+            assert_eq!(notice, Some(Record::FilterDefaulted), "raw {raw:?}");
+        }
+        for (raw, filter) in [
+            (Some("off"), LogFilter::Off),
+            (Some("error"), LogFilter::Error),
+            (Some("warn"), LogFilter::Warn),
+            (Some("info"), LogFilter::Info),
+        ] {
+            assert_eq!(
+                LogFilter::parse(raw).into_filter_and_notice(),
+                (filter, None),
                 "raw {raw:?}"
             );
         }
