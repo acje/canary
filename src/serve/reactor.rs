@@ -228,6 +228,17 @@ pub struct Reactor {
     rejected: u64,
 }
 
+/// Why one accept batch stopped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AcceptStop {
+    /// The listener reported an empty backlog, so nothing is left queued.
+    BacklogEmpty,
+    /// The slot table refused the next connection.
+    Capacity,
+    /// The batch spent [`ACCEPT_PER_TURN`] without reaching an empty backlog.
+    Budget,
+}
+
 impl Reactor {
     /// Registers `listener` and the shutdown pipe with the poller and reserves
     /// the event buffers.
@@ -625,13 +636,12 @@ impl Reactor {
     /// so no further connection is accepted until a release frees a slot.
     fn accept_ready(&mut self, now: Instant) -> Result<bool, ServeError> {
         let mut progress = false;
-        let mut at_would_block = false;
-        let mut at_capacity = false;
+        let mut stop = AcceptStop::Budget;
         for _ in 0..ACCEPT_PER_TURN {
             match self.listener.accept() {
                 Ok((stream, _address)) => {
                     let Some(index) = self.slots.acquire(stream, now) else {
-                        at_capacity = true;
+                        stop = AcceptStop::Capacity;
                         break;
                     };
                     let Some(source) = self.slots.stream_mut(index) else {
@@ -644,18 +654,18 @@ impl Reactor {
                     progress = true;
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    at_would_block = true;
+                    stop = AcceptStop::BacklogEmpty;
                     break;
                 }
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 Err(error) => return Err(ServeError::Accept(error.kind())),
             }
         }
-        if at_capacity {
+        if stop == AcceptStop::Capacity {
             self.set_listener_registered(false)?;
         }
-        self.accept_backlog = !(at_would_block || at_capacity);
-        Ok(progress || at_capacity)
+        self.accept_backlog = !matches!(stop, AcceptStop::BacklogEmpty | AcceptStop::Capacity);
+        Ok(progress || stop == AcceptStop::Capacity)
     }
 
     /// Visits the connection in `index` once, following its current phase.
