@@ -38,7 +38,7 @@ use signal_hook::low_level::pipe as signal_pipe;
 
 use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, ParseOutcome, Reply, ResponsePlan};
 use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DRAIN, LOG_RETRY};
-use crate::log::{LogFilter, LogQueue, Record, WriteOutcome};
+use crate::log::{LogFilter, LogQueue, QueueOutcome, Record};
 
 use super::slots::{Pending, Phase, Slots, WriteProgress};
 use super::{HEAD_BYTES, MAX_CONNECTIONS};
@@ -257,7 +257,7 @@ pub enum TurnOutcome {
 pub struct ShutdownReport {
     /// The outcome of queueing the final [`Record::Shutdown`]; a filtered or
     /// dropped record never reached the queue.
-    pub record: WriteOutcome,
+    pub record: QueueOutcome,
     /// The outcome of the bounded final drain.
     pub drain: DrainOutcome,
 }
@@ -655,7 +655,7 @@ impl Reactor {
             rejected: self.rejected,
             dropped: store.dropped(),
         };
-        let record = store.write(filter, record);
+        let record = store.enqueue(filter, record);
         let drain = sink::drain_until(store, sink, DrainBudget::DEFAULT, now + FLUSH_DRAIN);
         ShutdownReport { record, drain }
     }
@@ -708,18 +708,18 @@ impl Reactor {
             dropped: store.dropped(),
         };
         self.tick.last = Some(now);
-        match store.write(filter, record) {
-            WriteOutcome::Written => {
+        match store.enqueue(filter, record) {
+            QueueOutcome::Queued => {
                 self.tick.served = self.served;
                 self.tick.rejected = self.rejected;
                 true
             }
-            WriteOutcome::Filtered => {
+            QueueOutcome::Filtered => {
                 self.tick.served = self.served;
                 self.tick.rejected = self.rejected;
                 false
             }
-            WriteOutcome::Dropped => false,
+            QueueOutcome::Dropped => false,
         }
     }
 
@@ -986,12 +986,12 @@ impl Reactor {
                 self.sink.failures = self.sink.failures.saturating_add(1);
                 self.log_retry_at = Some(now + LOG_RETRY);
                 if !self.sink.recorded {
-                    self.sink.recorded = store.write(
+                    self.sink.recorded = store.enqueue(
                         filter,
                         Record::SinkFailure {
                             failures: self.sink.failures,
                         },
-                    ) != WriteOutcome::Dropped;
+                    ) != QueueOutcome::Dropped;
                 }
                 false
             }
@@ -1086,7 +1086,7 @@ mod tests {
     };
     use crate::http::ResponsePlan;
     use crate::log::sink::{self, DrainOutcome, LOG_RETRY};
-    use crate::log::{LogFilter, LogQueue, QUEUE_SLOTS, Record, WriteOutcome};
+    use crate::log::{LogFilter, LogQueue, QUEUE_SLOTS, QueueOutcome, Record};
     use crate::serve::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS};
     use mio::Token;
     use mio::net::TcpListener as MioListener;
@@ -1535,8 +1535,8 @@ mod tests {
                 dropped: 0,
             };
             assert_eq!(
-                harness.store.write(LogFilter::Info, record),
-                WriteOutcome::Written
+                harness.store.enqueue(LogFilter::Info, record),
+                QueueOutcome::Queued
             );
         }
         assert_eq!(harness.turn(), TurnOutcome::Progress);
@@ -1629,8 +1629,8 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .write(LogFilter::Info, Record::FilterDefaulted),
-            WriteOutcome::Written
+                .enqueue(LogFilter::Info, Record::FilterDefaulted),
+            QueueOutcome::Queued
         );
         let outcome = {
             harness
@@ -1677,8 +1677,8 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .write(LogFilter::Info, Record::FilterDefaulted),
-            WriteOutcome::Written
+                .enqueue(LogFilter::Info, Record::FilterDefaulted),
+            QueueOutcome::Queued
         );
         harness.now = Instant::now();
         let report = harness.reactor.shutdown(
@@ -1687,7 +1687,7 @@ mod tests {
             &mut harness.sink,
             harness.now,
         );
-        assert_eq!(report.record, WriteOutcome::Written);
+        assert_eq!(report.record, QueueOutcome::Queued);
         assert_eq!(report.drain, DrainOutcome::Idle);
         assert!(harness.store.is_empty());
         assert_eq!(
@@ -1706,8 +1706,8 @@ mod tests {
                 dropped: 0,
             };
             assert_eq!(
-                harness.store.write(LogFilter::Info, record),
-                WriteOutcome::Written
+                harness.store.enqueue(LogFilter::Info, record),
+                QueueOutcome::Queued
             );
         }
         harness.now = Instant::now();
@@ -1717,7 +1717,7 @@ mod tests {
             &mut harness.sink,
             harness.now,
         );
-        assert_eq!(report.record, WriteOutcome::Dropped);
+        assert_eq!(report.record, QueueOutcome::Dropped);
         assert_eq!(harness.store.dropped(), 1);
     }
 
@@ -1769,8 +1769,8 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .write(LogFilter::Info, Record::FilterDefaulted),
-            WriteOutcome::Written
+                .enqueue(LogFilter::Info, Record::FilterDefaulted),
+            QueueOutcome::Queued
         );
         let mut sink = FailingSink {
             kind: ErrorKind::BrokenPipe,

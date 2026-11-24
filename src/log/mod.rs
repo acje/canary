@@ -276,12 +276,12 @@ impl Record {
     }
 }
 
-/// The outcome of one [`LogQueue::write`] call.
+/// The outcome of one [`LogQueue::enqueue`] call.
 #[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WriteOutcome {
+pub enum QueueOutcome {
     /// The record was encoded and appended to the queue.
-    Written,
+    Queued,
     /// The filter suppressed the record; the queue and drop counter are
     /// untouched.
     Filtered,
@@ -324,7 +324,7 @@ impl std::error::Error for LogQueueError {}
 ///
 /// The ring holds at most [`QUEUE_SLOTS`] records of at most [`SLOT_BYTES`] bytes
 /// each. The byte buffer is reserved once by [`LogQueue::new`] and never grows;
-/// [`LogQueue::write`] rejects a record rather than allocate.
+/// [`LogQueue::enqueue`] rejects a record rather than allocate.
 pub struct LogQueue {
     bytes: Vec<u8>,
     lengths: [usize; QUEUE_SLOTS],
@@ -359,28 +359,28 @@ impl LogQueue {
 
     /// Encodes `record` into one slot and appends it when the filter allows it.
     ///
-    /// A [`WriteOutcome::Filtered`] result leaves both the queue and the drop
-    /// counter untouched. A [`WriteOutcome::Dropped`] result leaves the queue
+    /// A [`QueueOutcome::Filtered`] result leaves both the queue and the drop
+    /// counter untouched. A [`QueueOutcome::Dropped`] result leaves the queue
     /// untouched and advances [`LogQueue::dropped`] by one.
-    pub fn write(&mut self, filter: LogFilter, record: Record) -> WriteOutcome {
+    pub fn enqueue(&mut self, filter: LogFilter, record: Record) -> QueueOutcome {
         if !filter.allows(record.level()) {
-            return WriteOutcome::Filtered;
+            return QueueOutcome::Filtered;
         }
         if self.len == QUEUE_SLOTS {
             self.record_drop();
-            return WriteOutcome::Dropped;
+            return QueueOutcome::Dropped;
         }
         let mut slot = Slot::new();
         if record.render(&mut slot).is_err() {
             self.record_drop();
-            return WriteOutcome::Dropped;
+            return QueueOutcome::Dropped;
         }
         let index = (self.head + self.len) & SLOT_MASK;
         let start = index * SLOT_BYTES;
         self.bytes[start..start + slot.len].copy_from_slice(slot.as_bytes());
         self.lengths[index] = slot.len;
         self.len += 1;
-        WriteOutcome::Written
+        QueueOutcome::Queued
     }
 
     /// The bytes of the front record that the sink has not yet accepted.
@@ -490,7 +490,7 @@ impl fmt::Write for Slot {
 mod tests {
     use super::{
         ConsumeOutcome, Level, LogFilter, LogQueue, LogQueueError, MAX_SINK_FAILURE_BYTES,
-        QUEUE_BYTES, QUEUE_SLOTS, Record, SLOT_BYTES, Slot, WriteOutcome,
+        QUEUE_BYTES, QUEUE_SLOTS, QueueOutcome, Record, SLOT_BYTES, Slot,
     };
     use std::fmt::Write as _;
     use std::net::SocketAddr;
@@ -512,8 +512,8 @@ mod tests {
         let mut store = store();
         let bind = address("0.0.0.0:8080");
         assert_eq!(
-            store.write(LogFilter::Info, Record::Startup { bind }),
-            WriteOutcome::Written
+            store.enqueue(LogFilter::Info, Record::Startup { bind }),
+            QueueOutcome::Queued
         );
         assert_eq!(
             store.unwritten_front().unwrap(),
@@ -526,8 +526,8 @@ mod tests {
         let mut store = store();
         let bind = address("[::]:8080");
         assert_eq!(
-            store.write(LogFilter::Info, Record::Startup { bind }),
-            WriteOutcome::Written
+            store.enqueue(LogFilter::Info, Record::Startup { bind }),
+            QueueOutcome::Queued
         );
         assert_eq!(
             store.unwritten_front().unwrap(),
@@ -540,8 +540,8 @@ mod tests {
         let mut store = store();
         let bind = address("[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535");
         assert_eq!(
-            store.write(LogFilter::Info, Record::Startup { bind }),
-            WriteOutcome::Written
+            store.enqueue(LogFilter::Info, Record::Startup { bind }),
+            QueueOutcome::Queued
         );
         assert_eq!(
             store.unwritten_front().unwrap(),
@@ -557,7 +557,7 @@ mod tests {
             rejected: 2,
             dropped: 3,
         };
-        assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+        assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         assert_eq!(
             store.unwritten_front().unwrap(),
             b"level=info kind=tick served=1 rejected=2 dropped=3\r\n"
@@ -572,7 +572,7 @@ mod tests {
             rejected: 5,
             dropped: 6,
         };
-        assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+        assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         assert_eq!(
             store.unwritten_front().unwrap(),
             b"level=info kind=shutdown served=4 rejected=5 dropped=6\r\n"
@@ -583,8 +583,8 @@ mod tests {
     fn filter_defaulted_record_renders_exact_bytes() {
         let mut store = store();
         assert_eq!(
-            store.write(LogFilter::Info, Record::FilterDefaulted),
-            WriteOutcome::Written
+            store.enqueue(LogFilter::Info, Record::FilterDefaulted),
+            QueueOutcome::Queued
         );
         assert_eq!(
             store.unwritten_front().unwrap(),
@@ -596,8 +596,8 @@ mod tests {
     fn sink_failure_record_renders_exact_bytes() {
         let mut store = store();
         assert_eq!(
-            store.write(LogFilter::Info, Record::SinkFailure { failures: 7 }),
-            WriteOutcome::Written
+            store.enqueue(LogFilter::Info, Record::SinkFailure { failures: 7 }),
+            QueueOutcome::Queued
         );
         assert_eq!(
             store.unwritten_front().unwrap(),
@@ -609,7 +609,7 @@ mod tests {
     fn a_maximal_sink_failure_count_fills_exactly_its_reserved_line() {
         let mut store = store();
         let record = Record::SinkFailure { failures: u64::MAX };
-        assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+        assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         let front = store.unwritten_front().unwrap();
         assert_eq!(
             front,
@@ -626,7 +626,7 @@ mod tests {
             rejected: u64::MAX,
             dropped: u64::MAX,
         };
-        assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+        assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         assert_eq!(
             store.unwritten_front().unwrap(),
             b"level=info kind=tick served=18446744073709551615 rejected=18446744073709551615 dropped=18446744073709551615\r\n"
@@ -710,15 +710,15 @@ mod tests {
         ];
         for record in lower_levels {
             assert_eq!(
-                store.write(LogFilter::Error, record),
-                WriteOutcome::Filtered,
+                store.enqueue(LogFilter::Error, record),
+                QueueOutcome::Filtered,
                 "record {record:?}"
             );
         }
         assert!(store.is_empty());
         assert_eq!(
-            store.write(LogFilter::Error, Record::SinkFailure { failures: 1 }),
-            WriteOutcome::Written
+            store.enqueue(LogFilter::Error, Record::SinkFailure { failures: 1 }),
+            QueueOutcome::Queued
         );
         assert_eq!(
             store.unwritten_front().unwrap(),
@@ -791,8 +791,8 @@ mod tests {
             bind: address("0.0.0.0:8080"),
         };
         assert_eq!(
-            store.write(LogFilter::Error, record),
-            WriteOutcome::Filtered
+            store.enqueue(LogFilter::Error, record),
+            QueueOutcome::Filtered
         );
         assert_eq!(store.dropped(), 0);
         assert!(store.is_empty());
@@ -807,10 +807,10 @@ mod tests {
             rejected: 0,
             dropped: 0,
         };
-        assert_eq!(store.write(LogFilter::Warn, tick), WriteOutcome::Filtered);
+        assert_eq!(store.enqueue(LogFilter::Warn, tick), QueueOutcome::Filtered);
         assert_eq!(
-            store.write(LogFilter::Warn, Record::FilterDefaulted),
-            WriteOutcome::Written
+            store.enqueue(LogFilter::Warn, Record::FilterDefaulted),
+            QueueOutcome::Queued
         );
         assert_eq!(
             store.unwritten_front().unwrap(),
@@ -822,11 +822,11 @@ mod tests {
     fn off_filter_suppresses_every_level() {
         let mut store = store();
         assert_eq!(
-            store.write(LogFilter::Off, Record::FilterDefaulted),
-            WriteOutcome::Filtered
+            store.enqueue(LogFilter::Off, Record::FilterDefaulted),
+            QueueOutcome::Filtered
         );
         assert_eq!(
-            store.write(
+            store.enqueue(
                 LogFilter::Off,
                 Record::Tick {
                     served: 0,
@@ -834,11 +834,11 @@ mod tests {
                     dropped: 0
                 }
             ),
-            WriteOutcome::Filtered
+            QueueOutcome::Filtered
         );
         assert_eq!(
-            store.write(LogFilter::Off, Record::SinkFailure { failures: 1 }),
-            WriteOutcome::Filtered
+            store.enqueue(LogFilter::Off, Record::SinkFailure { failures: 1 }),
+            QueueOutcome::Filtered
         );
         assert_eq!(store.dropped(), 0);
         assert!(store.is_empty());
@@ -854,7 +854,7 @@ mod tests {
                 rejected: 0,
                 dropped: 0,
             };
-            assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+            assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         }
         assert_eq!(store.len(), QUEUE_SLOTS);
         let unchanged = front(&store);
@@ -864,15 +864,15 @@ mod tests {
             dropped: 0,
         };
         assert_eq!(
-            store.write(LogFilter::Info, rejected),
-            WriteOutcome::Dropped
+            store.enqueue(LogFilter::Info, rejected),
+            QueueOutcome::Dropped
         );
         assert_eq!(store.dropped(), 1);
         assert_eq!(store.len(), QUEUE_SLOTS);
         assert_eq!(store.unwritten_front().unwrap(), unchanged.as_slice());
         assert_eq!(
-            store.write(LogFilter::Info, rejected),
-            WriteOutcome::Dropped
+            store.enqueue(LogFilter::Info, rejected),
+            QueueOutcome::Dropped
         );
         assert_eq!(store.dropped(), 2);
     }
@@ -890,7 +890,7 @@ mod tests {
                     rejected: 0,
                     dropped: 0,
                 };
-                assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+                assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
                 next_written += 1;
             }
             for _ in 0..per_round {
@@ -914,10 +914,10 @@ mod tests {
             rejected: 2,
             dropped: 3,
         };
-        assert_eq!(store.write(LogFilter::Info, first), WriteOutcome::Written);
+        assert_eq!(store.enqueue(LogFilter::Info, first), QueueOutcome::Queued);
         assert_eq!(
-            store.write(LogFilter::Info, Record::FilterDefaulted),
-            WriteOutcome::Written
+            store.enqueue(LogFilter::Info, Record::FilterDefaulted),
+            QueueOutcome::Queued
         );
         let expected_first = b"level=info kind=tick served=1 rejected=2 dropped=3\r\n";
         let split = 9;
@@ -942,8 +942,8 @@ mod tests {
         assert_eq!(store.consume_front(0), ConsumeOutcome::Advanced);
         assert!(store.is_empty());
         assert_eq!(
-            store.write(LogFilter::Info, Record::FilterDefaulted),
-            WriteOutcome::Written
+            store.enqueue(LogFilter::Info, Record::FilterDefaulted),
+            QueueOutcome::Queued
         );
         let unchanged = front(&store);
         assert_eq!(store.consume_front(0), ConsumeOutcome::Advanced);
@@ -959,7 +959,7 @@ mod tests {
             rejected: 8,
             dropped: 9,
         };
-        assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+        assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         let unchanged = front(&store);
         assert_eq!(
             store.consume_front(unchanged.len() + 1),
@@ -997,7 +997,7 @@ mod tests {
                 rejected: 0,
                 dropped: 0,
             };
-            assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+            assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         }
         assert_eq!(store.len(), QUEUE_SLOTS);
         assert_eq!(store.bytes.capacity(), reserved);

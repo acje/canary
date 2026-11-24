@@ -15,7 +15,7 @@ use canary::config::RuntimePlan;
 use canary::exit::ExitCode;
 use canary::http::ResponsePlan;
 use canary::log::sink::{self, DrainBudget, FLUSH_DRAIN, NonblockingStdout};
-use canary::log::{LogQueue, Record, WriteOutcome};
+use canary::log::{LogQueue, QueueOutcome, Record};
 use canary::probe::{self, Invocation, ProbeOutcome};
 use canary::serve::{Reactor, ShutdownReport, ShutdownSignals, TurnOutcome, TurnWait};
 
@@ -112,7 +112,7 @@ fn run() -> ExitCode {
         }
     };
 
-    let _ = store.write(plan.filter, Record::Startup { bind });
+    let _ = store.enqueue(plan.filter, Record::Startup { bind });
     let _ = sink::drain_until(
         &mut store,
         &mut sink,
@@ -120,7 +120,7 @@ fn run() -> ExitCode {
         Instant::now() + FLUSH_DRAIN,
     );
     if let Some(notice) = plan.notice {
-        let _ = store.write(plan.filter, notice);
+        let _ = store.enqueue(plan.filter, notice);
         let _ = sink::drain(&mut store, &mut sink, DrainBudget::DEFAULT);
     }
 
@@ -160,12 +160,12 @@ fn run() -> ExitCode {
 /// Whether the final flush lost a record rather than merely filtered one.
 ///
 /// The flush is incomplete when the final [`Record::Shutdown`] was
-/// [`WriteOutcome::Dropped`], or when the bounded drain left records queued. A
-/// [`WriteOutcome::Written`] or [`WriteOutcome::Filtered`] record over an empty
+/// [`QueueOutcome::Dropped`], or when the bounded drain left records queued. A
+/// [`QueueOutcome::Queued`] or [`QueueOutcome::Filtered`] record over an empty
 /// queue lost nothing: the filter is the operator's own choice, and an empty
 /// queue means every queued record reached the sink.
 fn shutdown_flush_incomplete(report: &ShutdownReport, store: &LogQueue) -> bool {
-    matches!(report.record, WriteOutcome::Dropped) || !store.is_empty()
+    matches!(report.record, QueueOutcome::Dropped) || !store.is_empty()
 }
 
 /// Binds `address` as a nonblocking listener the reactor can own.
@@ -190,10 +190,10 @@ fn failed(message: impl fmt::Display, code: ExitCode) -> ExitCode {
 mod tests {
     use super::shutdown_flush_incomplete;
     use canary::log::sink::DrainOutcome;
-    use canary::log::{LogFilter, LogQueue, Record, WriteOutcome};
+    use canary::log::{LogFilter, LogQueue, QueueOutcome, Record};
     use canary::serve::ShutdownReport;
 
-    fn report(record: WriteOutcome) -> ShutdownReport {
+    fn report(record: QueueOutcome) -> ShutdownReport {
         ShutdownReport {
             record,
             drain: DrainOutcome::Idle,
@@ -207,14 +207,14 @@ mod tests {
             rejected: 0,
             dropped: 0,
         };
-        assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+        assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         store
     }
 
     #[test]
     fn a_written_record_over_an_empty_queue_is_a_complete_flush() {
         assert!(!shutdown_flush_incomplete(
-            &report(WriteOutcome::Written),
+            &report(QueueOutcome::Queued),
             &LogQueue::new().unwrap()
         ));
     }
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn a_filtered_record_over_an_empty_queue_is_a_complete_flush() {
         assert!(!shutdown_flush_incomplete(
-            &report(WriteOutcome::Filtered),
+            &report(QueueOutcome::Filtered),
             &LogQueue::new().unwrap()
         ));
     }
@@ -230,14 +230,14 @@ mod tests {
     #[test]
     fn a_dropped_record_is_an_incomplete_flush() {
         assert!(shutdown_flush_incomplete(
-            &report(WriteOutcome::Dropped),
+            &report(QueueOutcome::Dropped),
             &LogQueue::new().unwrap()
         ));
     }
 
     #[test]
     fn a_record_left_queued_is_an_incomplete_flush() {
-        for record in [WriteOutcome::Written, WriteOutcome::Filtered] {
+        for record in [QueueOutcome::Queued, QueueOutcome::Filtered] {
             assert!(
                 shutdown_flush_incomplete(&report(record), &store_with_one_record()),
                 "record {record:?}"

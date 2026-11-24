@@ -268,7 +268,7 @@ mod tests {
         DrainBudget, DrainOutcome, FLUSH_DRAIN, NonblockingStdout, SINK_MAX_BYTES, SINK_MAX_OPS,
         drain, drain_until,
     };
-    use crate::log::{LogFilter, LogQueue, Record, WriteOutcome};
+    use crate::log::{LogFilter, LogQueue, QueueOutcome, Record};
     use std::collections::VecDeque;
     use std::fs::File;
     use std::io::{self, ErrorKind, Read, Write};
@@ -357,7 +357,7 @@ mod tests {
                 rejected: 0,
                 dropped: 0,
             };
-            assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+            assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         }
         store
     }
