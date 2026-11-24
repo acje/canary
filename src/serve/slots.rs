@@ -85,6 +85,13 @@ pub struct Slots {
 
 impl Slots {
     /// Reserves the fixed slot table.
+    ///
+    /// The reactor is the only constructor caller, so no `Default` path exists:
+    /// a second way to build an empty table would only invite a second owner.
+    #[expect(
+        clippy::new_without_default,
+        reason = "the owning reactor is the only constructor caller, so a Default impl would invite a second construction path"
+    )]
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -300,12 +307,6 @@ impl Slots {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.len == 0
-    }
-}
-
-impl Default for Slots {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
