@@ -10,7 +10,7 @@
 use mio::net::TcpStream;
 use std::time::Instant;
 
-use crate::http::{MalformedKind, ParseOutcome, Request, parse_head};
+use crate::http::{ParseOutcome, Request, parse_head};
 
 use super::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS, SLOT_METADATA_BYTES};
 
@@ -26,19 +26,6 @@ pub enum Pending {
     /// Answer with the fixed `400` reply.
     BadRequest,
     /// Answer with the fixed `431` reply.
-    TooLarge,
-}
-
-/// The classification of the head bytes buffered into a reading slot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReadOutcome {
-    /// The head is not terminated yet; read more.
-    Incomplete,
-    /// The head terminated with a valid request line.
-    Complete(Request),
-    /// The head terminated with an invalid request line.
-    Malformed(MalformedKind),
-    /// The head cannot terminate within [`super::HEAD_BYTES`].
     TooLarge,
 }
 
@@ -192,7 +179,7 @@ impl Slots {
     /// Copies at most the remaining head capacity and never grows past
     /// [`super::HEAD_BYTES`]. Returns `None` when `index` is not a reading slot.
     #[must_use]
-    pub fn read_into(&mut self, index: usize, bytes: &[u8]) -> Option<ReadOutcome> {
+    pub fn read_into(&mut self, index: usize, bytes: &[u8]) -> Option<ParseOutcome> {
         let occupant = self.entries.get_mut(index)?.occupant.as_mut()?;
         let Connection::Reading { head, len } = &mut occupant.connection else {
             return None;
@@ -201,7 +188,7 @@ impl Slots {
         let take = room.min(bytes.len());
         head[*len..*len + take].copy_from_slice(&bytes[..take]);
         *len += take;
-        Some(classify(&head[..*len]))
+        Some(parse_head(&head[..*len]))
     }
 
     /// Moves the reading slot `index` into a `total_len`-byte write of `pending`.
@@ -367,19 +354,10 @@ impl Default for Slots {
     }
 }
 
-fn classify(head: &[u8]) -> ReadOutcome {
-    match parse_head(head) {
-        ParseOutcome::Incomplete => ReadOutcome::Incomplete,
-        ParseOutcome::Complete(request) => ReadOutcome::Complete(request),
-        ParseOutcome::Malformed(kind) => ReadOutcome::Malformed(kind),
-        ParseOutcome::TooLarge => ReadOutcome::TooLarge,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Pending, Phase, ReadOutcome, Slots, WriteProgress};
-    use crate::http::{MalformedKind, Method, Target};
+    use super::{Pending, Phase, Slots, WriteProgress};
+    use crate::http::{MalformedKind, Method, ParseOutcome, Target};
     use crate::serve::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS};
     use mio::net::TcpStream;
     use std::io::Read as _;
@@ -500,11 +478,11 @@ mod tests {
         let index = slots.acquire(stream, now).unwrap();
         assert_eq!(
             slots.read_into(index, b"GET / HTT"),
-            Some(ReadOutcome::Incomplete)
+            Some(ParseOutcome::Incomplete)
         );
         assert_eq!(
             slots.read_into(index, &[b'a'; HEAD_BYTES]),
-            Some(ReadOutcome::TooLarge)
+            Some(ParseOutcome::TooLarge)
         );
     }
 
@@ -519,20 +497,20 @@ mod tests {
         assert_eq!(head.len(), HEAD_BYTES);
         assert!(matches!(
             slots.read_into(at_cap_index, &head),
-            Some(ReadOutcome::Complete(_))
+            Some(ParseOutcome::Complete(_))
         ));
         let (over, _over_peer) = fixture.stream();
         let over_index = slots.acquire(over, now).unwrap();
         let head = padded_head(HEAD_BYTES + 1);
         assert_eq!(
             slots.read_into(over_index, &head),
-            Some(ReadOutcome::TooLarge)
+            Some(ParseOutcome::TooLarge)
         );
         let (unterminated, _unterminated_peer) = fixture.stream();
         let unterminated_index = slots.acquire(unterminated, now).unwrap();
         assert_eq!(
             slots.read_into(unterminated_index, &[b'a'; HEAD_BYTES + 1]),
-            Some(ReadOutcome::TooLarge)
+            Some(ParseOutcome::TooLarge)
         );
     }
 
@@ -546,7 +524,7 @@ mod tests {
         let outcome = slots
             .read_into(complete, b"GET / HTTP/1.1\r\n\r\n")
             .unwrap();
-        let ReadOutcome::Complete(request) = outcome else {
+        let ParseOutcome::Complete(request) = outcome else {
             panic!("expected a complete request, got {outcome:?}");
         };
         assert_eq!(request.method(), Method::Get);
@@ -555,7 +533,7 @@ mod tests {
         let malformed = slots.acquire(malformed_stream, now).unwrap();
         assert_eq!(
             slots.read_into(malformed, b"GET / HTTP/2.0\r\n\r\n"),
-            Some(ReadOutcome::Malformed(MalformedKind::VersionToken))
+            Some(ParseOutcome::Malformed(MalformedKind::VersionToken))
         );
     }
 
@@ -622,7 +600,7 @@ mod tests {
         assert_eq!(slots.cursor(index), None);
         let head = b"GET / HTTP/1.1\r\n\r\n";
         let outcome = slots.read_into(index, head).unwrap();
-        let ReadOutcome::Complete(request) = outcome else {
+        let ParseOutcome::Complete(request) = outcome else {
             panic!("expected a complete request, got {outcome:?}");
         };
         assert_eq!(slots.head_room(index), Some(HEAD_BYTES - head.len()));
@@ -644,7 +622,7 @@ mod tests {
         let (stream, _peer) = fixture.stream();
         let index = slots.acquire(stream, now).unwrap();
         let outcome = slots.read_into(index, b"GET / HTTP/1.1\r\n\r\n").unwrap();
-        let ReadOutcome::Complete(request) = outcome else {
+        let ParseOutcome::Complete(request) = outcome else {
             panic!("expected a complete request, got {outcome:?}");
         };
         let total = 120;

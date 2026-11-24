@@ -37,11 +37,11 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::low_level::pipe as signal_pipe;
 
 use crate::exit::ExitCode;
-use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, Reply, ResponsePlan};
+use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, ParseOutcome, Reply, ResponsePlan};
 use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DRAIN, LOG_RETRY};
 use crate::log::{LogFilter, LogStore, Record, WriteOutcome};
 
-use super::slots::{Pending, Phase, ReadOutcome, Slots, WriteProgress};
+use super::slots::{Pending, Phase, Slots, WriteProgress};
 use super::{HEAD_BYTES, MAX_CONNECTIONS};
 
 /// The poll token of the listening socket.
@@ -826,12 +826,12 @@ impl Reactor {
                 return Ok(false);
             };
             match outcome {
-                ReadOutcome::Incomplete => {}
-                ReadOutcome::Complete(request) => {
+                ParseOutcome::Incomplete => {}
+                ParseOutcome::Complete(request) => {
                     return self.begin_write(index, Pending::Answer(request));
                 }
-                ReadOutcome::Malformed(_) => return self.reject(index, Pending::BadRequest),
-                ReadOutcome::TooLarge => return self.reject(index, Pending::TooLarge),
+                ParseOutcome::Malformed(_) => return self.reject(index, Pending::BadRequest),
+                ParseOutcome::TooLarge => return self.reject(index, Pending::TooLarge),
             }
         }
         Ok(read_any)
