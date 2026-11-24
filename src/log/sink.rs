@@ -62,7 +62,8 @@ pub const LOG_RETRY: Duration = Duration::from_secs(1);
 /// remainder stays queued; at startup the serving turns offer it again, and at
 /// shutdown it is abandoned with the process. [`LogStore::dropped`] counts
 /// queue refusals only, so a leftover record never advances it. The returned
-/// [`DrainOutcome`] reports the short flush.
+/// [`DrainOutcome`] reports the short flush. Evidence:
+/// `drain_until_with_an_elapsed_deadline_performs_exactly_one_drain`.
 pub const FLUSH_DRAIN: Duration = Duration::from_millis(250);
 
 /// The result of one [`drain`] turn.

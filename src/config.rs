@@ -1,5 +1,6 @@
 //! The validated runtime plan assembled once from the only two external inputs.
 
+use std::env::VarError;
 use std::fmt;
 
 use crate::log::{LogFilter, Record};
@@ -13,7 +14,9 @@ use crate::port::{ListenPort, PortError};
 /// `warn`, and `info`, defaults an absent value to [`LogFilter::Info`] with no
 /// notice, and defaults any other supplied value to [`LogFilter::Info`] together
 /// with [`Record::FilterDefaulted`], which the plan carries as its
-/// [`RuntimePlan::notice`].
+/// [`RuntimePlan::notice`]. Only an absent variable is silent: a supplied value
+/// that names no severity earns the notice, and a value that is not valid
+/// Unicode text cannot name one, so it earns the notice too.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimePlan {
     /// The port to bind, where zero asks the operating system for one.
@@ -30,7 +33,9 @@ impl RuntimePlan {
     ///
     /// These are the only external inputs of the process: `PORT` is fatal and
     /// `RUST_LOG` is bounded and non-fatal, so a rejected filter never stops the
-    /// service and a missing or malformed port always does.
+    /// service and a missing or malformed port always does. The two inputs are
+    /// read through one seam each, so the plan tests exercise the same
+    /// translation of an environment answer that the process does.
     ///
     /// # Errors
     ///
@@ -39,7 +44,7 @@ impl RuntimePlan {
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_inputs(
             ListenPort::from_env(),
-            std::env::var("RUST_LOG").ok().as_deref(),
+            parse_var(std::env::var("RUST_LOG")).as_deref(),
         )
     }
 
@@ -55,6 +60,22 @@ impl RuntimePlan {
             filter,
             notice,
         })
+    }
+}
+
+/// Reads `RUST_LOG` once and reduces the three environment outcomes to the two
+/// the filter distinguishes.
+///
+/// Only an absent variable reaches the filter as `None`, because only an absent
+/// variable is the normal boot. A value that is not valid Unicode text is still
+/// a value the operator supplied, and it cannot name a severity, so it is
+/// examined as the empty text, which names none: it earns the same notice as
+/// every other unrecognised value instead of passing for silence.
+fn parse_var(raw: Result<String, VarError>) -> Option<String> {
+    match raw {
+        Ok(value) => Some(value),
+        Err(VarError::NotPresent) => None,
+        Err(VarError::NotUnicode(_)) => Some(String::new()),
     }
 }
 
@@ -77,7 +98,7 @@ impl std::error::Error for ConfigError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigError, RuntimePlan};
+    use super::{ConfigError, RuntimePlan, parse_var};
     use crate::log::{Level, LogFilter, Record};
     use crate::port::{ListenPort, Port, PortError};
 
@@ -87,6 +108,27 @@ mod tests {
         assert_eq!(plan.listen, ListenPort::Ephemeral);
         assert_eq!(plan.filter, LogFilter::Info);
         assert_eq!(plan.notice, None);
+    }
+
+    #[test]
+    fn a_text_value_and_an_absent_variable_stay_distinct() {
+        assert_eq!(parse_var(Ok("info".to_owned())).as_deref(), Some("info"));
+        assert_eq!(parse_var(Err(std::env::VarError::NotPresent)), None);
+    }
+
+    #[test]
+    fn a_non_unicode_rust_log_earns_the_notice_rather_than_silence() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid = std::env::VarError::NotUnicode(OsString::from_vec(vec![0xff]));
+        let plan = RuntimePlan::from_inputs(
+            Ok(ListenPort::Ephemeral),
+            parse_var(Err(invalid)).as_deref(),
+        )
+        .unwrap();
+        assert_eq!(plan.filter, LogFilter::Info);
+        assert_eq!(plan.notice, Some(Record::FilterDefaulted));
     }
 
     #[test]

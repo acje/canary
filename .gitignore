@@ -1,2 +1,5 @@
 /target
 **/*.rs.bk
+.ooda/
+.beads.gate.lock
+.beads/interactions.jsonl
