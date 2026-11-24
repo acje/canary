@@ -22,7 +22,7 @@ ignore = [
     { id = "RUSTSEC-2026-0009", reason = "time 0.3.36 via cookie/actix; fix is time >= 0.3.47, a lock refresh barred in M01; removed in M03" },
     { id = "RUSTSEC-2025-0023", reason = "tokio 1.41.0 dragged in by actix-rt; fix is tokio >= 1.44.2, a lock refresh barred in M01; no async runtime survives M03" },
     { id = "RUSTSEC-2026-0386", reason = "tokio 1.41.0 dragged in by actix-rt; fix is tokio >= 1.53.3, a lock refresh barred in M01; no async runtime survives M03" },
-    { id = "RUSTSEC-2026-0592", reason = "url 2.5.4 is the highest lockable release under rustc 1.100; fix is url >= 2.5.9, barred by the MSRV-aware resolver; url leaves the graph in M03/M05 (hand-written head parser)" },
+    { id = "RUSTSEC-2026-0592", reason = "`cargo update -p url --dry-run` reports \"Locking 0 packages to highest Rust 1.100 compatible versions\" and `--verbose` prints \"Unchanged url v2.5.4 (available: v2.5.9)\"; url leaves the graph in M03/M05 (hand-written head parser)" },
     { id = "RUSTSEC-2026-0391", reason = "zstd 0.13.2 via actix-http compression features; fix is zstd ^0.13.4, a lock refresh barred in M01; removed in M03" },
     { id = "RUSTSEC-2026-0395", reason = "zstd-safe 7.2.1 via actix-http compression features; fix is zstd-safe ^7.4.0, a lock refresh barred in M01; removed in M03" },
     { id = "RUSTSEC-2026-0397", reason = "zstd-safe 7.2.1 via actix-http compression features; fix is zstd-safe ^7.4.0, a lock refresh barred in M01; removed in M03" },

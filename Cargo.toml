@@ -9,12 +9,16 @@ license = "MIT"
 [lints.rust]
 unused_must_use = "deny"
 unsafe_op_in_unsafe_fn = "deny"
+unsafe_code = "deny"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 undocumented_unsafe_blocks = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
 
 [dependencies]
 actix-web = "4"
