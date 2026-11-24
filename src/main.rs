@@ -149,7 +149,7 @@ fn run() -> ExitCode {
     if shutdown_flush_incomplete(&report, &store) {
         eprintln!(
             "canary: shutdown flush incomplete: record={:?} drain={:?} leftover={}",
-            report.record,
+            report.final_record,
             report.drain,
             store.len()
         );
@@ -165,7 +165,7 @@ fn run() -> ExitCode {
 /// queue lost nothing: the filter is the operator's own choice, and an empty
 /// queue means every queued record reached the sink.
 fn shutdown_flush_incomplete(report: &ShutdownReport, store: &LogQueue) -> bool {
-    matches!(report.record, QueueOutcome::Dropped) || !store.is_empty()
+    matches!(report.final_record, QueueOutcome::Dropped) || !store.is_empty()
 }
 
 /// Binds `address` as a nonblocking listener the reactor can own.
@@ -193,9 +193,9 @@ mod tests {
     use canary::log::{Counters, LogFilter, LogQueue, QueueOutcome, Record};
     use canary::serve::ShutdownReport;
 
-    fn report(record: QueueOutcome) -> ShutdownReport {
+    fn report(final_record: QueueOutcome) -> ShutdownReport {
         ShutdownReport {
-            record,
+            final_record,
             drain: DrainOutcome::Idle,
         }
     }

@@ -257,7 +257,7 @@ pub enum TurnOutcome {
 pub struct ShutdownReport {
     /// The outcome of queueing the final [`Record::Shutdown`]; a filtered or
     /// dropped record never reached the queue.
-    pub record: QueueOutcome,
+    pub final_record: QueueOutcome,
     /// The outcome of the bounded final drain.
     pub drain: DrainOutcome,
 }
@@ -635,14 +635,14 @@ impl Reactor {
     /// making, and the deadline bounds it.
     ///
     /// The caller exits [`ExitCode::Ok`](crate::exit::ExitCode::Ok) once this
-    /// returns, whatever the outcome:
-    /// a shutdown the process was asked for is a successful stop. Records the
-    /// deadline or a failing sink left queued are abandoned with the process.
-    /// This final drain queues no [`Record::SinkFailure`] of its own: a failure
-    /// an earlier turn latched already carries its own record when the filter and
-    /// the queue allowed one, while a failure first observed here is visible only
-    /// through the returned [`ShutdownReport`], whose fields name whether the last
-    /// line was queued and why the flush ended short.
+    /// returns, whatever the outcome: a shutdown the process was asked for is a
+    /// successful stop. Records the deadline or a failing sink left queued are
+    /// abandoned with the process. This final drain queues no
+    /// [`Record::SinkFailure`] of its own: a failure an earlier turn latched
+    /// already carries its own record when the filter and the queue allowed one,
+    /// while a failure first observed here is visible only through the returned
+    /// [`ShutdownReport`], whose fields name whether the last line was queued and
+    /// why the flush ended short.
     pub fn shutdown(
         &mut self,
         store: &mut LogQueue,
@@ -650,14 +650,17 @@ impl Reactor {
         sink: &mut impl Write,
         now: Instant,
     ) -> ShutdownReport {
-        let record = Record::Shutdown(Counters {
+        let final_record = Record::Shutdown(Counters {
             served: self.served,
             rejected: self.rejected,
             dropped: store.dropped(),
         });
-        let record = store.enqueue(filter, record);
+        let final_record = store.enqueue(filter, final_record);
         let drain = sink::drain_until(store, sink, DrainBudget::DEFAULT, now + FLUSH_DEADLINE);
-        ShutdownReport { record, drain }
+        ShutdownReport {
+            final_record,
+            drain,
+        }
     }
 
     /// Drains whatever the shutdown pipe holds and latches the request.
@@ -1687,7 +1690,7 @@ mod tests {
             &mut harness.sink,
             harness.now,
         );
-        assert_eq!(report.record, QueueOutcome::Queued);
+        assert_eq!(report.final_record, QueueOutcome::Queued);
         assert_eq!(report.drain, DrainOutcome::Idle);
         assert!(harness.store.is_empty());
         assert_eq!(
@@ -1717,7 +1720,7 @@ mod tests {
             &mut harness.sink,
             harness.now,
         );
-        assert_eq!(report.record, QueueOutcome::Dropped);
+        assert_eq!(report.final_record, QueueOutcome::Dropped);
         assert_eq!(harness.store.dropped(), 1);
     }
 
