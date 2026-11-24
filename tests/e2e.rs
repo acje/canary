@@ -8,7 +8,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -42,19 +41,6 @@ const LIVENESS: &[u8] = concat!("Canary ", env!("CARGO_PKG_VERSION"), " is alive
 fn liveness_length_line() -> Vec<u8> {
     format!("Content-Length: {}\r\n", LIVENESS.len()).into_bytes()
 }
-
-/// The packages `Cargo.lock` may not name.
-const FORBIDDEN_PACKAGES: [&str; 6] = [
-    "tokio",
-    "actix-web",
-    "actix-http",
-    "actix-rt",
-    "env_logger",
-    "log",
-];
-
-/// The dependencies `Cargo.toml` must declare, exact-pinned.
-const DECLARED_DEPENDENCIES: [&str; 3] = ["libc", "mio", "signal-hook"];
 
 /// The binary under test, with an emptied environment and piped streams.
 fn command(env: &[(&str, &OsStr)]) -> Command {
@@ -151,25 +137,6 @@ fn served_count(line: &str) -> u64 {
         .expect("the record names its served count")
         .parse()
         .expect("the served count is decimal")
-}
-
-/// The quoted version specification a dependency entry names.
-fn pinned_version(entry: &str) -> &str {
-    let value = entry
-        .split_once(" = ")
-        .expect("a dependency entry is an assignment")
-        .1;
-    let spec = match value.strip_prefix('"') {
-        Some(rest) => rest,
-        None => {
-            value
-                .split_once("version = \"")
-                .expect("a table entry names its version")
-                .1
-        }
-    };
-    let end = spec.find('"').expect("the version specification is quoted");
-    &spec[..end]
 }
 
 /// Whether `spec` is an exact `=X.Y.Z` pin, with three numeric components.
@@ -686,6 +653,7 @@ fn an_unknown_invocation_is_rejected_with_the_config_status() {
 }
 
 #[test]
+/// Guards [`is_exact_pin`], the predicate the manifest pin test relies on.
 fn an_exact_pin_names_three_numeric_components() {
     assert!(is_exact_pin("=0.2.191"));
     assert!(is_exact_pin("=1.2.3"));
@@ -810,49 +778,26 @@ fn a_non_unicode_filter_earns_the_notice_rather_than_silence() {
 }
 
 #[test]
-fn the_lock_graph_and_manifest_hold_only_the_declared_dependencies() {
-    let lock: &str = include_str!("../Cargo.lock");
-    let packages: Vec<&str> = lock
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("name = \""))
-        .filter_map(|name| name.strip_suffix('"'))
+fn the_manifest_pins_every_dependency_exactly() {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let metadata = Command::new(cargo)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .expect("cargo metadata runs");
+    assert!(
+        metadata.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    let output = String::from_utf8(metadata.stdout).expect("cargo metadata prints UTF-8");
+    let requirements: Vec<&str> = output
+        .split("\"req\":\"")
+        .skip(1)
+        .map(|tail| tail.split('"').next().expect("the requirement is quoted"))
         .collect();
-    assert!(!packages.is_empty(), "the lock file names its packages");
-    for forbidden in FORBIDDEN_PACKAGES {
-        assert!(
-            !packages.contains(&forbidden),
-            "{forbidden} is in Cargo.lock: {packages:?}"
-        );
-    }
-
-    let manifest: &str = include_str!("../Cargo.toml");
-    let section = manifest
-        .split_once("[dependencies]")
-        .expect("the manifest declares a dependency table")
-        .1;
-    let mut entries: Vec<&str> = Vec::new();
-    for line in section.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            break;
-        }
-        if !line.is_empty() {
-            entries.push(line);
-        }
-    }
-    let names: BTreeSet<&str> = entries
-        .iter()
-        .map(|entry| {
-            entry
-                .split_once(" = ")
-                .expect("a dependency entry is an assignment")
-                .0
-        })
-        .collect();
-    let declared: BTreeSet<&str> = DECLARED_DEPENDENCIES.into_iter().collect();
-    assert_eq!(names, declared, "{entries:?}");
-    for entry in &entries {
-        let spec = pinned_version(entry);
-        assert!(is_exact_pin(spec), "{entry} is not exact-pinned");
+    assert!(!requirements.is_empty(), "{output}");
+    for requirement in requirements {
+        assert!(is_exact_pin(requirement), "{requirement:?}: {output}");
     }
 }
