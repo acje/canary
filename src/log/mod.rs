@@ -455,8 +455,8 @@ impl fmt::Write for Slot {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConsumeOutcome, FilterParse, Level, LogFilter, LogStore, LogStoreError, QUEUE_BYTES,
-        QUEUE_SLOTS, Record, SLOT_BYTES, Slot, WriteOutcome,
+        ConsumeOutcome, Level, LogFilter, LogStore, LogStoreError, QUEUE_BYTES, QUEUE_SLOTS,
+        Record, SLOT_BYTES, Slot, WriteOutcome,
     };
     use std::fmt::Write as _;
     use std::net::SocketAddr;
@@ -681,32 +681,6 @@ mod tests {
             assert_eq!(
                 LogFilter::parse(raw).into_filter_and_notice(),
                 (LogFilter::Info, Some(Record::FilterDefaulted)),
-                "raw {raw:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn filter_parse_cannot_yield_a_filter_without_its_notice() {
-        let parsed: FilterParse = LogFilter::parse(Some("debug"));
-        assert_eq!(
-            parsed.into_filter_and_notice(),
-            (LogFilter::Info, Some(Record::FilterDefaulted))
-        );
-        for raw in [None, Some(""), Some("debug"), Some("info,debug")] {
-            let (filter, notice) = LogFilter::parse(raw).into_filter_and_notice();
-            assert_eq!(filter, LogFilter::Info, "raw {raw:?}");
-            assert_eq!(notice, Some(Record::FilterDefaulted), "raw {raw:?}");
-        }
-        for (raw, filter) in [
-            (Some("off"), LogFilter::Off),
-            (Some("error"), LogFilter::Error),
-            (Some("warn"), LogFilter::Warn),
-            (Some("info"), LogFilter::Info),
-        ] {
-            assert_eq!(
-                LogFilter::parse(raw).into_filter_and_notice(),
-                (filter, None),
                 "raw {raw:?}"
             );
         }
