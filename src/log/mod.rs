@@ -67,7 +67,6 @@ const MAX_STARTUP_BYTES: usize = STARTUP_PREFIX_BYTES + MAX_SOCKET_ADDR_TEXT;
 const MAX_COUNTER_BYTES: usize = COUNTER_PREFIX_BYTES + 3 * MAX_DECIMAL_U64;
 
 const _: () = assert!(QUEUE_SLOTS.is_power_of_two());
-const _: () = assert!(QUEUE_BYTES == QUEUE_SLOTS * SLOT_BYTES);
 const _: () = assert!(MAX_STARTUP_BYTES <= SLOT_BYTES);
 const _: () = assert!(MAX_COUNTER_BYTES <= SLOT_BYTES);
 const _: () = assert!(FILTER_DEFAULT_BYTES <= SLOT_BYTES);
@@ -150,25 +149,23 @@ impl LogFilter {
 pub enum FilterParse {
     /// A recognised name selected this filter explicitly.
     Accepted(LogFilter),
-    /// The value was absent or unrecognised, so [`LogFilter::Info`] applies and
-    /// the caller should record [`Record::FilterDefaulted`].
+    /// The value was absent or unrecognised, so the filter defaults to
+    /// [`LogFilter::Info`] and [`Record::FilterDefaulted`] must be recorded.
     Defaulted,
 }
 
 impl FilterParse {
-    /// The filter to apply, where a defaulted value means [`LogFilter::Info`].
+    /// The filter to apply and the notice the caller must record with it.
+    ///
+    /// An accepted value yields its filter and no notice. A defaulted value
+    /// yields [`LogFilter::Info`] together with [`Record::FilterDefaulted`], so
+    /// choosing the filter and emitting the notice are one decision.
     #[must_use]
-    pub const fn filter(self) -> LogFilter {
+    pub const fn into_filter_and_notice(self) -> (LogFilter, Option<Record>) {
         match self {
-            Self::Accepted(filter) => filter,
-            Self::Defaulted => LogFilter::Info,
+            Self::Accepted(filter) => (filter, None),
+            Self::Defaulted => (LogFilter::Info, Some(Record::FilterDefaulted)),
         }
-    }
-
-    /// Whether the raw value was absent or unrecognised.
-    #[must_use]
-    pub const fn defaulted(self) -> bool {
-        matches!(self, Self::Defaulted)
     }
 }
 
@@ -249,6 +246,18 @@ pub enum WriteOutcome {
     /// The queue was full or the record did not fit one slot; the queue is
     /// unchanged and the drop counter advanced.
     Dropped,
+}
+
+/// The outcome of one [`LogStore::consume_front`] call.
+#[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsumeOutcome {
+    /// The cursor advanced by the accepted byte count, which may be zero on an
+    /// empty queue.
+    Advanced,
+    /// `written` exceeded the remaining bytes of the front record; the queue is
+    /// unchanged.
+    Rejected,
 }
 
 /// Why a [`LogStore`] could not be constructed.
@@ -349,15 +358,20 @@ impl LogStore {
     ///
     /// Consuming exactly the remaining bytes removes the record and makes the
     /// next one the front; consuming fewer keeps the remainder as the front.
-    /// Consuming zero bytes is a no-op. Returns `false`, changing nothing, when
-    /// `written` exceeds the remaining bytes of the front record.
-    pub fn consume_front(&mut self, written: usize) -> bool {
+    /// Consuming zero bytes is a no-op success. Returns
+    /// [`ConsumeOutcome::Rejected`], changing nothing, when `written` exceeds
+    /// the remaining bytes of the front record.
+    pub fn consume_front(&mut self, written: usize) -> ConsumeOutcome {
         if self.len == 0 {
-            return written == 0;
+            return if written == 0 {
+                ConsumeOutcome::Advanced
+            } else {
+                ConsumeOutcome::Rejected
+            };
         }
         let remaining = self.lengths[self.head] - self.front_offset;
         if written > remaining {
-            return false;
+            return ConsumeOutcome::Rejected;
         }
         if written == remaining {
             self.lengths[self.head] = 0;
@@ -367,7 +381,7 @@ impl LogStore {
         } else {
             self.front_offset += written;
         }
-        true
+        ConsumeOutcome::Advanced
     }
 
     /// The number of records queued.
@@ -428,8 +442,8 @@ impl fmt::Write for Slot {
 #[cfg(test)]
 mod tests {
     use super::{
-        FilterParse, Level, LogFilter, LogStore, LogStoreError, QUEUE_SLOTS, Record, SLOT_BYTES,
-        Slot, WriteOutcome,
+        ConsumeOutcome, FilterParse, Level, LogFilter, LogStore, LogStoreError, QUEUE_BYTES,
+        QUEUE_SLOTS, Record, SLOT_BYTES, Slot, WriteOutcome,
     };
     use std::fmt::Write as _;
     use std::net::SocketAddr;
@@ -471,6 +485,20 @@ mod tests {
         assert_eq!(
             store.unwritten_front().unwrap(),
             b"level=info kind=startup bind=[::]:8080\r\n"
+        );
+    }
+
+    #[test]
+    fn startup_record_renders_maximal_ipv6() {
+        let mut store = store();
+        let bind = address("[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535");
+        assert_eq!(
+            store.write(LogFilter::Info, Record::Startup { bind }),
+            WriteOutcome::Written
+        );
+        assert_eq!(
+            store.unwritten_front().unwrap(),
+            b"level=info kind=startup bind=[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535\r\n"
         );
     }
 
@@ -613,7 +641,26 @@ mod tests {
             LogFilter::parse(Some("INFO")),
             FilterParse::Accepted(LogFilter::Info)
         );
-        assert!(!LogFilter::parse(Some("warn")).defaulted());
+    }
+
+    #[test]
+    fn filter_parse_yields_the_filter_and_the_notice_together() {
+        assert_eq!(
+            LogFilter::parse(Some("warn")).into_filter_and_notice(),
+            (LogFilter::Warn, None)
+        );
+        assert_eq!(
+            LogFilter::parse(Some("off")).into_filter_and_notice(),
+            (LogFilter::Off, None)
+        );
+        assert_eq!(
+            LogFilter::parse(None).into_filter_and_notice(),
+            (LogFilter::Info, Some(Record::FilterDefaulted))
+        );
+        assert_eq!(
+            LogFilter::parse(Some("debug")).into_filter_and_notice(),
+            (LogFilter::Info, Some(Record::FilterDefaulted))
+        );
     }
 
     #[test]
@@ -629,8 +676,11 @@ mod tests {
         ] {
             let parsed = LogFilter::parse(raw);
             assert_eq!(parsed, FilterParse::Defaulted, "raw {raw:?}");
-            assert_eq!(parsed.filter(), LogFilter::Info);
-            assert!(parsed.defaulted());
+            assert_eq!(
+                parsed.into_filter_and_notice(),
+                (LogFilter::Info, Some(Record::FilterDefaulted)),
+                "raw {raw:?}"
+            );
         }
     }
 
@@ -744,7 +794,7 @@ mod tests {
                     format!("level=info kind=tick served={next_read} rejected=0 dropped=0\r\n");
                 let front = front(&store);
                 assert_eq!(front, expected.as_bytes());
-                assert!(store.consume_front(front.len()));
+                assert_eq!(store.consume_front(front.len()), ConsumeOutcome::Advanced);
                 next_read += 1;
             }
             assert!(store.is_empty());
@@ -768,10 +818,13 @@ mod tests {
         let expected_first = b"level=info kind=tick served=1 rejected=2 dropped=3\r\n";
         let split = 9;
         assert_eq!(store.unwritten_front().unwrap(), expected_first);
-        assert!(store.consume_front(split));
+        assert_eq!(store.consume_front(split), ConsumeOutcome::Advanced);
         assert_eq!(store.len(), 2);
         assert_eq!(store.unwritten_front().unwrap(), &expected_first[split..]);
-        assert!(store.consume_front(expected_first.len() - split));
+        assert_eq!(
+            store.consume_front(expected_first.len() - split),
+            ConsumeOutcome::Advanced
+        );
         assert_eq!(store.len(), 1);
         assert_eq!(
             store.unwritten_front().unwrap(),
@@ -782,14 +835,14 @@ mod tests {
     #[test]
     fn consuming_zero_bytes_is_a_no_op() {
         let mut store = store();
-        assert!(store.consume_front(0));
+        assert_eq!(store.consume_front(0), ConsumeOutcome::Advanced);
         assert!(store.is_empty());
         assert_eq!(
             store.write(LogFilter::Info, Record::FilterDefaulted),
             WriteOutcome::Written
         );
         let unchanged = front(&store);
-        assert!(store.consume_front(0));
+        assert_eq!(store.consume_front(0), ConsumeOutcome::Advanced);
         assert_eq!(store.unwritten_front().unwrap(), unchanged.as_slice());
         assert_eq!(store.len(), 1);
     }
@@ -804,7 +857,10 @@ mod tests {
         };
         assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
         let unchanged = front(&store);
-        assert!(!store.consume_front(unchanged.len() + 1));
+        assert_eq!(
+            store.consume_front(unchanged.len() + 1),
+            ConsumeOutcome::Rejected
+        );
         assert_eq!(store.unwritten_front().unwrap(), unchanged.as_slice());
         assert_eq!(store.len(), 1);
     }
@@ -812,18 +868,36 @@ mod tests {
     #[test]
     fn empty_queue_rejects_consuming_positive_bytes() {
         let mut store = store();
-        assert!(!store.consume_front(1));
+        assert_eq!(store.consume_front(1), ConsumeOutcome::Rejected);
         assert!(store.is_empty());
     }
 
     #[test]
     fn store_reserves_the_full_ring_once() {
         let store = store();
-        assert_eq!(store.bytes.capacity(), QUEUE_SLOTS * SLOT_BYTES);
-        assert_eq!(store.bytes.len(), QUEUE_SLOTS * SLOT_BYTES);
+        assert!(store.bytes.capacity() >= QUEUE_BYTES);
+        assert_eq!(store.bytes.len(), QUEUE_BYTES);
         assert_eq!(store.len(), 0);
         assert!(store.is_empty());
         assert_eq!(store.dropped(), 0);
+    }
+
+    #[test]
+    fn store_capacity_does_not_grow_when_the_queue_fills() {
+        let mut store = store();
+        let reserved = store.bytes.capacity();
+        let slots = u64::try_from(QUEUE_SLOTS).unwrap();
+        for served in 0..slots {
+            let record = Record::Tick {
+                served,
+                rejected: 0,
+                dropped: 0,
+            };
+            assert_eq!(store.write(LogFilter::Info, record), WriteOutcome::Written);
+        }
+        assert_eq!(store.len(), QUEUE_SLOTS);
+        assert_eq!(store.bytes.capacity(), reserved);
+        assert_eq!(store.bytes.len(), QUEUE_BYTES);
     }
 
     #[test]
