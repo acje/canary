@@ -1,33 +1,35 @@
-# Modify standard Rust image
-FROM docker.io/rust:latest as build
+# The toolchain is pinned twice: the tag names 1.100 and the digest fixes the
+# exact index, so a moved tag cannot change the builder.
+FROM docker.io/library/rust:1.100-bookworm@sha256:1b9dc70890ec494e466c87f5ad41ad544bfb30ea6acc99a3e068c47a4ae3f23e AS build
 
-ENV USER=canaryuser
-ENV UID=12345
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --no-create-home \
-    --uid "$UID" \
-    "$USER"
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rustfmt.toml deny.toml ./
+COPY src ./src
+COPY tests ./tests
+RUN cargo build --release --locked
 
-# Cache dependencies
-WORKDIR /usr/src/canary
-# COPY Cargo.toml Cargo.toml
-# COPY Cargo.lock Cargo.lock
-# RUN mkdir src/
-# RUN echo "fn main() {println!(\"if you see this, the build broke\")}" > src/main.rs
-# RUN cargo build --release
-# RUN rm -f target/release/deps/canary*
+# The runtime image carries the binary and nothing else: no apt step, no shell
+# tools, and no account database.
+FROM docker.io/library/debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
 
-# Final Rust build stage. Docker caches up to this stage if dependencies are unchanged.
-COPY . .
-RUN cargo build --release 
+COPY --from=build /src/target/release/canary /usr/local/bin/canary
 
-# Final Docker build Stage
-FROM debian:bookworm-slim
-COPY --from=build /usr/src/canary/target/release/canary .
-COPY --from=build /etc/passwd /etc/passwd
-USER canaryuser
+# A numeric UID needs no passwd entry, so the image creates no user and copies
+# no /etc/passwd. 10001 sits outside Debian's system-account range, so it cannot
+# collide with a packaged account.
+USER 10001:10001
 
-ENV RUST_LOG=info
-ENTRYPOINT ["./canary"]
+ENV PORT=8080
+EXPOSE 8080
+
+# The probe is bounded by 1 s connect plus 1 s read, so --timeout covers one
+# whole probe. --start-period covers the bind window: a probe before the
+# listener exists exits 1, never 78, because the probe owns its own zero/one
+# status. The command is exactly --health-check with no extra arguments: any
+# other invocation shape is rejected with 78 and must not be read as unhealthy.
+# podman's default OCI image format drops this instruction, so build with
+# `--format docker` as the README command does.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD ["/usr/local/bin/canary", "--health-check"]
+
+ENTRYPOINT ["/usr/local/bin/canary"]

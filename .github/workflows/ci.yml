@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The toolchain is pinned here rather than in a rust-toolchain file so the
+      # local checkout and the gate can move independently only on purpose.
+      - name: Pin the toolchain
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.100.0
+          cargo --version
+          rustc --version
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.19.4 --locked
+
+      - name: Deny
+        run: cargo deny check
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      # The service is one endpoint with no async runtime, so the normal graph
+      # may name none of the removed stack and must stay within five packages
+      # including canary itself. The checks are explicit branches because a
+      # negated pipeline does not trip errexit.
+      - name: Dependency graph
+        run: |
+          graph="$(cargo tree -e normal --prefix none --format '{p}')"
+          if grep -Eq '^(actix-web|tokio|env_logger|log) ' <<<"$graph"; then
+            echo "a removed dependency is in the normal graph" >&2
+            exit 1
+          fi
+          packages="$(printf '%s\n' "$graph" | sort -u | wc -l)"
+          if [ "$packages" -gt 5 ]; then
+            echo "the normal graph holds $packages packages, at most 5 allowed" >&2
+            exit 1
+          fi

@@ -1,2 +1,9 @@
+.git
+.beads
+.ooda
 target
+.github
 Dockerfile
+.dockerignore
+README.md
+LICENSE
