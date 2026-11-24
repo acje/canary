@@ -128,8 +128,11 @@ pub enum MalformedKind {
 pub enum ParseOutcome {
     /// More bytes are needed before the head can be classified.
     ///
-    /// At end of input an `Incomplete` head is a client error, never a wait:
-    /// the caller answers `400`.
+    /// At end of input the caller's answer depends on what arrived: an
+    /// `Incomplete` head holding at least one byte is a client error the caller
+    /// answers with `400`, while a connection that closes having sent no byte is
+    /// closed without a reply. A connection whose deadline expires with its head
+    /// still incomplete is also closed without a reply.
     Incomplete,
     /// The head ended and its request line is valid.
     Complete(Request),

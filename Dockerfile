@@ -25,7 +25,9 @@ COPY LICENSE /usr/local/share/canary/LICENSE
 # collide with a packaged account.
 USER 10001:10001
 
-ENV PORT=8080
+# No `PORT` default is set: an absent `PORT` is rejected configuration (`78`),
+# so the image fails like the bare binary instead of serving on a guessed port.
+# `EXPOSE` only documents the port the image is meant to be given.
 EXPOSE 8080
 
 # The probe is bounded by 1 s connect plus 1 s read, so --timeout covers one
@@ -33,6 +35,8 @@ EXPOSE 8080
 # listener exists exits 1, never 78, because the probe owns its own zero/one
 # status. The command is exactly --health-check with no extra arguments: any
 # other invocation shape is rejected with 78 and must not be read as unhealthy.
+# No PORT default exists, so this check passes only for a container the operator
+# started with PORT supplied.
 # podman's default OCI image format drops this instruction, so build with
 # `--format docker` as the README command does.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \

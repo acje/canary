@@ -41,8 +41,8 @@ use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, Reply, ResponsePlan};
 use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DRAIN, LOG_RETRY};
 use crate::log::{LogFilter, LogStore, Record, WriteOutcome};
 
-use super::MAX_CONNECTIONS;
 use super::slots::{Pending, Phase, ReadOutcome, Slots, WriteProgress};
+use super::{HEAD_BYTES, MAX_CONNECTIONS};
 
 /// The poll token of the listening socket.
 pub const TOKEN_LISTENER: usize = 0;
@@ -440,11 +440,12 @@ impl Reactor {
 
     /// The requests the reactor refused.
     ///
-    /// A refusal is a malformed head (`400`), an oversized head (`431`), or a
-    /// connection whose absolute deadline passed before its reply completed. It is
-    /// counted when the reactor decides it rather than when its reply finishes, so
-    /// a `400` or `431` whose reply was cut short still counts, while a client
-    /// that leaves before its head terminates is neither served nor rejected.
+    /// A refusal is a malformed head (`400`), a truncated head whose peer closed
+    /// before its terminator (`400`), an oversized head (`431`), or a connection
+    /// whose absolute deadline passed before its reply completed. It is counted
+    /// when the reactor decides it rather than when its reply finishes, so a
+    /// `400` or `431` whose reply was cut short still counts, while a client
+    /// that closes without sending a byte is neither served nor rejected.
     ///
     /// Saturates at `u64::MAX`.
     #[must_use]
@@ -787,48 +788,66 @@ impl Reactor {
         }
     }
 
-    /// Reads one bounded chunk into a reading slot and acts on its head verdict.
+    /// Reads the head bytes a reading slot offers and acts on their verdict.
     ///
-    /// The scratch buffer is one [`READ_BYTES_PER_TURN`] allocation on the stack
-    /// per read, never held across reads and never grown, so a turn carries at
-    /// most one such buffer at a time.
+    /// One turn spends at most [`READ_BYTES_PER_TURN`] bytes from one
+    /// connection, one stack scratch buffer of that size at a time, never held
+    /// across turns and never grown. Within that budget the slot is read until
+    /// its head classifies or the socket reports it has nothing more to offer.
     ///
-    /// One read per event relies on a nonblocking TCP read consuming everything
-    /// the socket offers: a read that returns less than it was offered is taken
-    /// as having drained the kernel buffer. A residue left under edge-triggered
-    /// readiness would go unannounced, and such a connection is closed at its
-    /// deadline rather than hanging.
+    /// Reading past the last buffered byte is what exposes an end of input: an
+    /// edge-triggered poller announces the readiness that carried a partial head
+    /// once, so a peer that half-closed behind its bytes would otherwise wait out
+    /// its deadline instead of earning its `400`.
     fn read_ready(&mut self, index: usize) -> Result<bool, ServeError> {
         let Some(room) = self.slots.head_room(index) else {
             return Ok(false);
         };
-        let cap = room.min(READ_BYTES_PER_TURN);
-        if cap == 0 {
+        let mut budget = room.min(READ_BYTES_PER_TURN);
+        if budget == 0 {
             return Ok(false);
         }
         let mut buffer = [0u8; READ_BYTES_PER_TURN];
-        let Some(stream) = self.slots.stream_mut(index) else {
-            return Ok(false);
-        };
-        let read = match stream.read(&mut buffer[..cap]) {
-            Ok(0) => return self.begin_close_and_release(index),
-            Ok(read) => read,
-            Err(error)
-                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) =>
-            {
+        let mut read_any = false;
+        while budget > 0 {
+            let Some(stream) = self.slots.stream_mut(index) else {
                 return Ok(false);
+            };
+            let read = match stream.read(&mut buffer[..budget]) {
+                Ok(0) => return self.read_eof(index),
+                Ok(read) => read,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(read_any),
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => return self.begin_close_and_release(index),
+            };
+            budget -= read;
+            read_any = true;
+            let Some(outcome) = self.slots.read_into(index, &buffer[..read]) else {
+                return Ok(false);
+            };
+            match outcome {
+                ReadOutcome::Incomplete => {}
+                ReadOutcome::Complete(request) => {
+                    return self.begin_write(index, Pending::Answer(request));
+                }
+                ReadOutcome::Malformed(_) => return self.reject(index, Pending::BadRequest),
+                ReadOutcome::TooLarge => return self.reject(index, Pending::TooLarge),
             }
-            Err(_) => return self.begin_close_and_release(index),
-        };
-        let Some(outcome) = self.slots.read_into(index, &buffer[..read]) else {
-            return Ok(false);
-        };
-        match outcome {
-            ReadOutcome::Incomplete => Ok(read > 0),
-            ReadOutcome::Complete(request) => self.begin_write(index, Pending::Answer(request)),
-            ReadOutcome::Malformed(_) => self.reject(index, Pending::BadRequest),
-            ReadOutcome::TooLarge => self.reject(index, Pending::TooLarge),
         }
+        Ok(read_any)
+    }
+
+    /// Acts on a read that ended at end of input in the reading slot `index`.
+    ///
+    /// A peer that sent at least one head byte and then closed has truncated
+    /// its head before the terminator, which is a client error answered `400`
+    /// exactly like a malformed line. A peer that closed without sending a byte
+    /// has made no request, so it is closed without a reply.
+    fn read_eof(&mut self, index: usize) -> Result<bool, ServeError> {
+        if self.slots.head_room(index) == Some(HEAD_BYTES) {
+            return self.begin_close_and_release(index);
+        }
+        self.reject(index, Pending::BadRequest)
     }
 
     /// Moves a reading slot into a write of `pending` and asks for writability.
@@ -1082,7 +1101,7 @@ mod tests {
     use mio::net::TcpListener as MioListener;
     use std::any::Any;
     use std::io::{self, ErrorKind, Read, Write};
-    use std::net::{SocketAddr, TcpStream};
+    use std::net::{Shutdown, SocketAddr, TcpStream};
     use std::panic::{self, AssertUnwindSafe};
     use std::time::{Duration, Instant};
 
@@ -1354,6 +1373,36 @@ mod tests {
         client.read_to_end(&mut received).unwrap();
         assert_eq!(received, plan().ok_get());
         assert_eq!(harness.reactor.served(), 1);
+    }
+
+    #[test]
+    fn a_truncated_head_at_eof_answers_400_and_releases_the_slot() {
+        let mut harness = Harness::new();
+        let mut client = harness.connect();
+        client.write_all(b"GET / HTT").unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        harness.drive_until(|harness| {
+            harness.reactor.rejected() == 1 && harness.reactor.slots.is_empty()
+        });
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).unwrap();
+        assert_eq!(received, plan().bad_request());
+        assert_eq!(harness.reactor.rejected(), 1);
+        assert_eq!(harness.reactor.served(), 0);
+    }
+
+    #[test]
+    fn a_peer_that_closes_before_sending_a_byte_gets_no_reply() {
+        let mut harness = Harness::new();
+        let mut client = harness.connect();
+        harness.drive_until(|harness| harness.reactor.slots.len() == 1);
+        client.shutdown(Shutdown::Write).unwrap();
+        harness.drive_until(|harness| harness.reactor.slots.is_empty());
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).unwrap();
+        assert_eq!(received, []);
+        assert_eq!(harness.reactor.rejected(), 0);
+        assert_eq!(harness.reactor.served(), 0);
     }
 
     #[test]

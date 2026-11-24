@@ -16,19 +16,20 @@ four crates: `libc`, `mio`, `signal-hook`, and its `signal-hook-registry`.
 | `HEAD` | `/` | `200` with the headers and no body |
 | `GET`, `HEAD` | any target other than `/` | `404`, headers only for `HEAD` |
 | any other method | any target | `405` with `Allow: GET, HEAD` |
-| any | a malformed request line, or a head that ends at EOF before its terminator | `400` |
+| any | a malformed request line, or a partial head whose sender closed before the terminator | `400` |
 | any | a head that cannot be terminated within `1024` bytes | `431` |
 
 The head is judged before the method and target are dispatched, so a `400` or
 `431` outranks the method and target rows, and `405` outranks the `404` for a
-target other than `/`. The body is always `Canary <version> is alive!`
+target other than `/`. A connection that sends nothing, or whose request is
+still unfinished when the connection deadline passes, is closed without a
+reply. A `200` reply always carries the body `Canary <version> is alive!`
 terminated by CRLF, and `Content-Length` names its exact byte count.
 
 ## `PORT`
 
-`PORT` is the only fatal input. The image supplies the default `PORT=8080`, so a
-forgotten `-e PORT` in a container serves on `8080` instead of failing with
-`78`; the binary itself has no default and still rejects an absent `PORT`.
+`PORT` is the only fatal input and has no default: the binary rejects an absent
+`PORT` with `78` before it binds, and the image sets no default either.
 
 - Absent, non-numeric, or outside `1..=65535`: the process exits `78` before it
   binds.
@@ -37,7 +38,8 @@ forgotten `-e PORT` in a container serves on `8080` instead of failing with
 
 The health probe dials `127.0.0.1:<PORT>`, so `PORT=0` cannot be probed: it
 answers `1` with `PORT is zero, so the listener's port is chosen at bind time
-and cannot be probed`.
+and cannot be probed`. The image supplies no default, so the `HEALTHCHECK` it
+declares passes only when the operator supplies `PORT`.
 
 ## Records
 
@@ -111,8 +113,14 @@ and its MIT license, and runs as UID `10001`.
 ```sh
 podman build --format docker -t canary .
 podman run --rm -e PORT=8080 -p 8080:8080 canary
+docker run --rm -e PORT=8080 -p 8080:8080 canary
 podman inspect --format '{{.State.Health.Status}}' <container>
 ```
+
+The image sets no `PORT` default, so the run line is exactly
+`-e PORT=8080 -p 8080:8080`: a container started without `-e PORT` exits `78`
+before it binds, and the declared health check therefore passes only for a
+container that was given `PORT`.
 
 `--format docker` is required: podman's default OCI image format drops the
 `HEALTHCHECK` instruction. The image declares the health check, so
