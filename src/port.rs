@@ -23,7 +23,7 @@ impl Port {
     /// [`PortError::NonNumeric`] for any non-digit byte, and
     /// [`PortError::OutOfRange`] when the decoded decimal value is zero or
     /// exceeds `65535`.
-    pub fn parse(raw: &str) -> Result<Self, PortError> {
+    pub(crate) fn parse(raw: &str) -> Result<Self, PortError> {
         let bytes = raw.as_bytes();
         if bytes.is_empty() {
             return Err(PortError::Empty);
@@ -73,7 +73,7 @@ impl PortRequest {
     ///
     /// Returns [`PortError::Missing`] when no value is supplied and otherwise
     /// the [`PortError`] reported by [`Port::parse`].
-    pub fn parse(raw: Option<&str>) -> Result<Self, PortError> {
+    pub(crate) fn parse(raw: Option<&str>) -> Result<Self, PortError> {
         match raw {
             None => Err(PortError::Missing),
             Some(value) if is_decimal_zero(value) => Ok(Self::Ephemeral),
@@ -88,7 +88,7 @@ impl PortRequest {
     /// Returns [`PortError::Missing`] when `PORT` is absent,
     /// [`PortError::NotUnicode`] when it is set but not valid Unicode text, and
     /// otherwise the [`PortError`] reported by [`Self::parse`].
-    pub fn from_env() -> Result<Self, PortError> {
+    pub(crate) fn from_env() -> Result<Self, PortError> {
         Self::parse_var(std::env::var("PORT"))
     }
 

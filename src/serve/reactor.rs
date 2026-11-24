@@ -40,28 +40,28 @@ use super::slots::{ConnectionPhase, ReplyChoice, Slots, WriteProgress};
 use super::{HEAD_BYTES, MAX_CONNECTIONS};
 
 /// The poll token of the listening socket.
-pub const TOKEN_LISTENER: usize = 0;
+pub(crate) const TOKEN_LISTENER: usize = 0;
 
 /// The poll token of the shutdown self-pipe.
 ///
 /// [`Reactor::new`] registers the pipe's read end here, so the first turn that
 /// sees the token reports [`TurnOutcome::ShuttingDown`].
-pub const TOKEN_SIGNAL: usize = 1;
+pub(crate) const TOKEN_SIGNAL: usize = 1;
 
 /// The poll token of the connection in the first slot.
 const TOKEN_FIRST_CONNECTION: usize = TOKEN_SIGNAL + 1;
 
 /// The poll events one turn may collect.
-pub const MAX_EVENTS: usize = 64;
+pub(crate) const MAX_EVENTS: usize = 64;
 
 /// The connections one turn may accept.
-pub const ACCEPT_PER_TURN: usize = 16;
+pub(crate) const ACCEPT_PER_TURN: usize = 16;
 
 /// The bytes one turn may read from one connection.
-pub const READ_BYTES_PER_TURN: usize = MAX_HEAD_BYTES;
+pub(crate) const READ_BYTES_PER_TURN: usize = MAX_HEAD_BYTES;
 
 /// The bytes one turn may write to one connection.
-pub const WRITE_BYTES_PER_TURN: usize = 512;
+pub(crate) const WRITE_BYTES_PER_TURN: usize = 512;
 
 /// The poll token of the last connection slot, which must fit the token space.
 const TOKEN_LAST_CONNECTION: usize = TOKEN_FIRST_CONNECTION + MAX_CONNECTIONS - 1;
@@ -72,10 +72,10 @@ const TOKEN_LAST_CONNECTION: usize = TOKEN_FIRST_CONNECTION + MAX_CONNECTIONS - 
 /// wall-clock time. Limit: one second, so [`Record::Tick`] costs the sink at most
 /// one line per second however much traffic arrives. Exhaustion: a tick the
 /// interval does not admit waits for the next [`Reactor::next_deadline`].
-pub const TICK_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The bytes one turn reads from the shutdown pipe in a single read.
-pub const SIGNAL_DRAIN_BYTES: usize = 64;
+pub(crate) const SIGNAL_DRAIN_BYTES: usize = 64;
 
 /// The reads one turn spends draining the shutdown pipe.
 ///
@@ -84,7 +84,7 @@ pub const SIGNAL_DRAIN_BYTES: usize = 64;
 /// turn clears up to 512 coalesced signal bytes. Exhaustion: the shutdown
 /// request is latched regardless, and a residue wakes the next turn, which
 /// reports [`TurnOutcome::ShuttingDown`] again.
-pub const SIGNAL_READS_PER_TURN: usize = 8;
+pub(crate) const SIGNAL_READS_PER_TURN: usize = 8;
 
 const _: () = assert!(TOKEN_LISTENER < TOKEN_SIGNAL);
 const _: () = assert!(TOKEN_SIGNAL < TOKEN_FIRST_CONNECTION);
@@ -93,7 +93,7 @@ const _: () = assert!(WRITE_BYTES_PER_TURN >= MAX_REPLY_BYTES);
 
 /// The poll token that names the connection in slot `index`.
 #[must_use]
-pub const fn connection_token(index: usize) -> Token {
+pub(crate) const fn connection_token(index: usize) -> Token {
     Token(TOKEN_FIRST_CONNECTION + index)
 }
 
@@ -102,7 +102,7 @@ pub const fn connection_token(index: usize) -> Token {
 /// Returns `None` for the listener token, the signal token, and every token past
 /// the last connection slot.
 #[must_use]
-pub const fn connection_slot(token: Token) -> Option<usize> {
+pub(crate) const fn connection_slot(token: Token) -> Option<usize> {
     let index = token.0.wrapping_sub(TOKEN_FIRST_CONNECTION);
     if index < MAX_CONNECTIONS {
         Some(index)
@@ -311,8 +311,9 @@ impl Reactor {
     ///
     /// A latched request is final: the reactor performs no further work, and
     /// [`Reactor::shutdown`] is the only step left for its owner.
+    #[cfg(test)]
     #[must_use]
-    pub const fn is_shutting_down(&self) -> bool {
+    pub(crate) const fn is_shutting_down(&self) -> bool {
         self.shutting_down
     }
 
@@ -323,8 +324,9 @@ impl Reactor {
     /// is never counted here, whatever it wrote.
     ///
     /// Saturates at `u64::MAX`.
+    #[cfg(test)]
     #[must_use]
-    pub const fn served(&self) -> u64 {
+    pub(crate) const fn served(&self) -> u64 {
         self.served
     }
 
@@ -338,8 +340,9 @@ impl Reactor {
     /// that closes without sending a byte is neither served nor rejected.
     ///
     /// Saturates at `u64::MAX`.
+    #[cfg(test)]
     #[must_use]
-    pub const fn rejected(&self) -> u64 {
+    pub(crate) const fn rejected(&self) -> u64 {
         self.rejected
     }
 
@@ -362,7 +365,7 @@ impl Reactor {
     /// `now` is the instant the caller sampled before waiting, so this value
     /// bounds the wait only; it never dates the work [`Reactor::turn`] performs.
     #[must_use]
-    pub fn next_deadline(&self, now: Instant) -> Option<Instant> {
+    pub(crate) fn next_deadline(&self, now: Instant) -> Option<Instant> {
         if self.accept_backlog {
             return Some(now);
         }

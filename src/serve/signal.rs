@@ -49,7 +49,7 @@ impl ShutdownSignals {
     ///
     /// Returns the operating system error when the pipe cannot be created or its
     /// read end cannot be switched to nonblocking mode.
-    pub fn detached() -> io::Result<Self> {
+    pub(crate) fn detached() -> io::Result<Self> {
         let (reader, writer) = io::pipe()?;
         let receiver = Receiver::from(OwnedFd::from(reader));
         receiver.set_nonblocking(true)?;

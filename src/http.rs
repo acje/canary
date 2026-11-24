@@ -10,17 +10,17 @@
 ///
 /// Callers feed at most this many bytes; a full window of this size without a
 /// head terminator is [`ParseOutcome::TooLarge`].
-pub const MAX_HEAD_BYTES: usize = 1024;
+pub(crate) const MAX_HEAD_BYTES: usize = 1024;
 
 /// The largest reply the plan renders, in bytes.
 ///
 /// Every planned reply is a fixed array of this size with a shorter live
 /// length, so no rendered reply is longer than this bound. The serving write
 /// path asserts its per-turn write budget covers one whole reply.
-pub const MAX_REPLY_BYTES: usize = 512;
+pub(crate) const MAX_REPLY_BYTES: usize = 512;
 
 /// The largest version text a liveness body accepts, in bytes.
-pub const MAX_VERSION_BYTES: usize = 128;
+pub(crate) const MAX_VERSION_BYTES: usize = 128;
 
 /// The digits a `usize` value may need in decimal.
 const DECIMAL_DIGITS: usize = 20;
@@ -68,7 +68,7 @@ const _: () =
 
 /// The request method classes the reply plan distinguishes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Method {
+pub(crate) enum Method {
     /// A `GET` token.
     Get,
     /// A `HEAD` token, answered with the headers of the matching `GET`.
@@ -79,7 +79,7 @@ pub enum Method {
 
 /// The request target classes the reply plan distinguishes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RequestTarget {
+pub(crate) enum RequestTarget {
     /// The target bytes are exactly `/`.
     Root,
     /// Every other target, including query, absolute-form, and traversal forms.
@@ -91,7 +91,7 @@ pub enum RequestTarget {
 /// The request version is validated but not retained: every reply is
 /// `HTTP/1.1` and closes the connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Request {
+pub(crate) struct Request {
     method: Method,
     target: RequestTarget,
 }
@@ -99,20 +99,20 @@ pub struct Request {
 impl Request {
     /// The request method class.
     #[must_use]
-    pub const fn method(self) -> Method {
+    pub(crate) const fn method(self) -> Method {
         self.method
     }
 
     /// The exact-match request target class.
     #[must_use]
-    pub const fn target(self) -> RequestTarget {
+    pub(crate) const fn target(self) -> RequestTarget {
         self.target
     }
 }
 
 /// Why a request line was rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MalformedKind {
+pub(crate) enum MalformedKind {
     /// The method token is missing or holds a byte outside the token set.
     MethodToken,
     /// The target token is missing or holds a byte outside the visible range.
@@ -125,7 +125,7 @@ pub enum MalformedKind {
 
 /// The classification of the request-head bytes read so far.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ParseOutcome {
+pub(crate) enum ParseOutcome {
     /// More bytes are needed before the head can be classified.
     ///
     /// At end of input the caller's answer depends on what arrived: an
@@ -154,7 +154,7 @@ pub enum ParseOutcome {
 /// beyond the `\r\n` discipline that terminates the head. A target is
 /// [`RequestTarget::Root`] only when its bytes are exactly `/`.
 #[must_use]
-pub fn parse_head(bytes: &[u8]) -> ParseOutcome {
+pub(crate) fn parse_head(bytes: &[u8]) -> ParseOutcome {
     let window = &bytes[..bytes.len().min(MAX_HEAD_BYTES)];
     match scan_head(window) {
         Scan::Line(end) => match parse_request_line(&window[..end]) {
@@ -276,21 +276,21 @@ const fn classify_target(token: &[u8]) -> RequestTarget {
 
 /// The header block of a reply, without its body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HeaderBlock<'a> {
+pub(crate) struct HeaderBlock<'a> {
     bytes: &'a [u8],
 }
 
 impl<'a> HeaderBlock<'a> {
     /// The header block bytes, ending with the empty line.
     #[must_use]
-    pub fn bytes(self) -> &'a [u8] {
+    pub(crate) fn bytes(self) -> &'a [u8] {
         self.bytes
     }
 }
 
 /// Which bytes the connection write path sends for one reply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Reply<'a> {
+pub(crate) enum Reply<'a> {
     /// A header block and its body in one slice.
     Full(&'a [u8]),
     /// A header block only, for a `HEAD` request.
@@ -338,45 +338,49 @@ impl ResponsePlan {
     }
 
     /// The complete `200` reply to `GET /`.
+    #[cfg(test)]
     #[must_use]
-    pub fn ok_get(&self) -> &[u8] {
+    pub(crate) fn ok_get(&self) -> &[u8] {
         self.ok.full()
     }
 
     /// The `200` header block for `HEAD /`, declaring the body length the
     /// matching `GET` would have sent.
+    #[cfg(test)]
     #[must_use]
-    pub fn ok_head(&self) -> HeaderBlock<'_> {
+    pub(crate) fn ok_head(&self) -> HeaderBlock<'_> {
         self.ok.head()
     }
 
     /// The complete `404` reply.
+    #[cfg(test)]
     #[must_use]
-    pub fn not_found(&self) -> &[u8] {
+    pub(crate) fn not_found(&self) -> &[u8] {
         self.not_found.full()
     }
 
     /// The complete `405` reply, carrying `Allow: GET, HEAD`.
+    #[cfg(test)]
     #[must_use]
-    pub fn method_not_allowed(&self) -> &[u8] {
+    pub(crate) fn method_not_allowed(&self) -> &[u8] {
         self.method_not_allowed.full()
     }
 
     /// The complete `400` reply.
     #[must_use]
-    pub fn bad_request(&self) -> &[u8] {
+    pub(crate) fn bad_request(&self) -> &[u8] {
         self.bad_request.full()
     }
 
     /// The complete `431` reply.
     #[must_use]
-    pub fn too_large(&self) -> &[u8] {
+    pub(crate) fn too_large(&self) -> &[u8] {
         self.too_large.full()
     }
 
     /// Selects the fixed reply a parsed request earns.
     #[must_use]
-    pub fn reply(&self, request: Request) -> Reply<'_> {
+    pub(crate) fn reply(&self, request: Request) -> Reply<'_> {
         match (request.method(), request.target()) {
             (Method::Other, _) => Reply::Full(self.method_not_allowed.full()),
             (Method::Get, RequestTarget::Root) => Reply::Full(self.ok.full()),

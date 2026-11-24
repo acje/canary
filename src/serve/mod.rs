@@ -15,24 +15,23 @@
 //! is the reactor's only path from a `SIGTERM` or `SIGINT` to shutdown, and its
 //! detached form keeps process handlers out of a test.
 
-pub mod reactor;
-pub mod signal;
-pub mod slots;
+mod reactor;
+mod signal;
+mod slots;
 
 pub use reactor::{Reactor, ServeError, ShutdownReport, TurnOutcome, TurnWait};
 pub use signal::ShutdownSignals;
-pub use slots::{ConnectionPhase, ReplyChoice, Slots, WriteProgress};
 
 use std::time::Duration;
 
 /// The number of connection slots reserved at startup.
-pub const MAX_CONNECTIONS: usize = 64;
+pub(crate) const MAX_CONNECTIONS: usize = 64;
 
 /// The largest request head one slot buffers, in bytes.
-pub const HEAD_BYTES: usize = crate::http::MAX_HEAD_BYTES;
+pub(crate) const HEAD_BYTES: usize = crate::http::MAX_HEAD_BYTES;
 
 /// The absolute lifetime of one accepted connection.
-pub const CONNECTION_DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const CONNECTION_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The bytes a slot may spend beyond its head buffer, covering the stream
 /// handle, the absolute deadline, the connection tag, the write cursor, and the
@@ -40,6 +39,6 @@ pub const CONNECTION_DEADLINE: Duration = Duration::from_secs(5);
 pub(crate) const SLOT_METADATA_BYTES: usize = 128;
 
 /// The bytes the whole slot table may occupy.
-pub const SLOT_BUDGET_BYTES: usize = 128 * 1024;
+pub(crate) const SLOT_BUDGET_BYTES: usize = 128 * 1024;
 
 const _: () = assert!(MAX_CONNECTIONS * (HEAD_BYTES + SLOT_METADATA_BYTES) <= SLOT_BUDGET_BYTES);

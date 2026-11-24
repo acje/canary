@@ -20,7 +20,7 @@ use super::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS, SLOT_METADATA_BYTE
 /// so a stored reply choice stays [`Copy`] and independent of the plan's
 /// lifetime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReplyChoice {
+pub(crate) enum ReplyChoice {
     /// Answer the parsed request through `ResponsePlan::reply`.
     Matched(Request),
     /// Answer with the fixed `400` reply.
@@ -31,7 +31,7 @@ pub enum ReplyChoice {
 
 /// The outcome of advancing a writing slot's cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WriteProgress {
+pub(crate) enum WriteProgress {
     /// Reply bytes remain to be written.
     Remaining,
     /// The cursor reached the reply length the caller supplied.
@@ -40,7 +40,7 @@ pub enum WriteProgress {
 
 /// The phase of one occupied slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConnectionPhase {
+pub(crate) enum ConnectionPhase {
     /// Buffering request-head bytes.
     Reading,
     /// Writing the selected reply.
@@ -78,7 +78,7 @@ const _: () = assert!(std::mem::size_of::<Option<Occupant>>() <= HEAD_BYTES + SL
 ///
 /// The table is built once from a fixed array; it owns every stream it accepts
 /// and exposes no way to replace or extend that array.
-pub struct Slots {
+pub(crate) struct Slots {
     entries: [Option<Occupant>; MAX_CONNECTIONS],
     len: usize,
 }
@@ -88,12 +88,8 @@ impl Slots {
     ///
     /// The reactor is the only constructor caller, so no `Default` path exists:
     /// a second way to build an empty table would only invite a second owner.
-    #[expect(
-        clippy::new_without_default,
-        reason = "the owning reactor is the only constructor caller, so a Default impl would invite a second construction path"
-    )]
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             entries: std::array::from_fn(|_| None),
             len: 0,
@@ -111,7 +107,7 @@ impl Slots {
     /// sweep that cannot meet that hazard, because it yields an owned stream
     /// rather than an index.
     #[must_use]
-    pub fn acquire(&mut self, stream: TcpStream, now: Instant) -> Option<usize> {
+    pub(crate) fn acquire(&mut self, stream: TcpStream, now: Instant) -> Option<usize> {
         let index = self.entries.iter().position(Option::is_none)?;
         self.entries[index] = Some(Occupant {
             stream,
@@ -128,7 +124,7 @@ impl Slots {
     /// Drops the stream of `index` and frees its slot.
     ///
     /// A vacant or out-of-range index changes nothing.
-    pub fn release(&mut self, index: usize) {
+    pub(crate) fn release(&mut self, index: usize) {
         let Some(entry) = self.entries.get_mut(index) else {
             return;
         };
@@ -142,7 +138,7 @@ impl Slots {
     ///
     /// Returns `None` for a vacant or out-of-range index.
     #[must_use]
-    pub fn stream_mut(&mut self, index: usize) -> Option<&mut TcpStream> {
+    pub(crate) fn stream_mut(&mut self, index: usize) -> Option<&mut TcpStream> {
         Some(&mut self.entries.get_mut(index)?.as_mut()?.stream)
     }
 
@@ -150,7 +146,7 @@ impl Slots {
     ///
     /// Returns `None` when `index` is not a reading slot.
     #[must_use]
-    pub fn head_room(&self, index: usize) -> Option<usize> {
+    pub(crate) fn head_room(&self, index: usize) -> Option<usize> {
         match &self.entries.get(index)?.as_ref()?.connection {
             Connection::Reading { len, .. } => Some(HEAD_BYTES - *len),
             Connection::Writing { .. } | Connection::Closing => None,
@@ -161,7 +157,7 @@ impl Slots {
     ///
     /// Returns `None` when `index` is not a writing slot.
     #[must_use]
-    pub fn cursor(&self, index: usize) -> Option<usize> {
+    pub(crate) fn cursor(&self, index: usize) -> Option<usize> {
         match &self.entries.get(index)?.as_ref()?.connection {
             Connection::Writing { cursor, .. } => Some(*cursor),
             Connection::Reading { .. } | Connection::Closing => None,
@@ -173,7 +169,7 @@ impl Slots {
     /// Returns `None` when no slot is occupied. The scan touches each slot
     /// once, so it is bounded by [`super::MAX_CONNECTIONS`].
     #[must_use]
-    pub fn earliest_deadline(&self) -> Option<Instant> {
+    pub(crate) fn earliest_deadline(&self) -> Option<Instant> {
         self.entries
             .iter()
             .filter_map(|entry| entry.as_ref().map(|occupant| occupant.expires_at))
@@ -185,7 +181,7 @@ impl Slots {
     /// Copies at most the remaining head capacity and never grows past
     /// [`super::HEAD_BYTES`]. Returns `None` when `index` is not a reading slot.
     #[must_use]
-    pub fn read_into(&mut self, index: usize, bytes: &[u8]) -> Option<ParseOutcome> {
+    pub(crate) fn read_into(&mut self, index: usize, bytes: &[u8]) -> Option<ParseOutcome> {
         let occupant = self.entries.get_mut(index)?.as_mut()?;
         let Connection::Reading { head, len } = &mut occupant.connection else {
             return None;
@@ -202,7 +198,12 @@ impl Slots {
     /// `total_len` is the byte length of the plan reply the reactor selected.
     /// Returns `false` when `index` is not a reading slot.
     #[must_use]
-    pub fn begin_write(&mut self, index: usize, pending: ReplyChoice, total_len: usize) -> bool {
+    pub(crate) fn begin_write(
+        &mut self,
+        index: usize,
+        pending: ReplyChoice,
+        total_len: usize,
+    ) -> bool {
         let Some(occupant) = self.entries.get_mut(index).and_then(|entry| entry.as_mut()) else {
             return false;
         };
@@ -224,7 +225,11 @@ impl Slots {
     /// [`WriteProgress::Finished`] exactly when the cursor reaches it, and `None`
     /// when `index` is not a writing slot.
     #[must_use]
-    pub fn advance_written(&mut self, index: usize, written: usize) -> Option<WriteProgress> {
+    pub(crate) fn advance_written(
+        &mut self,
+        index: usize,
+        written: usize,
+    ) -> Option<WriteProgress> {
         let occupant = self.entries.get_mut(index)?.as_mut()?;
         let Connection::Writing {
             cursor, reply_len, ..
@@ -245,7 +250,7 @@ impl Slots {
     ///
     /// Returns `None` when `index` is not a writing slot.
     #[must_use]
-    pub fn pending(&self, index: usize) -> Option<ReplyChoice> {
+    pub(crate) fn pending(&self, index: usize) -> Option<ReplyChoice> {
         match &self.entries.get(index)?.as_ref()?.connection {
             Connection::Writing { pending, .. } => Some(*pending),
             Connection::Reading { .. } | Connection::Closing => None,
@@ -256,7 +261,7 @@ impl Slots {
     ///
     /// Returns `None` for a vacant or out-of-range index.
     #[must_use]
-    pub fn phase(&self, index: usize) -> Option<ConnectionPhase> {
+    pub(crate) fn phase(&self, index: usize) -> Option<ConnectionPhase> {
         Some(match &self.entries.get(index)?.as_ref()?.connection {
             Connection::Reading { .. } => ConnectionPhase::Reading,
             Connection::Writing { .. } => ConnectionPhase::Writing,
@@ -268,7 +273,7 @@ impl Slots {
     ///
     /// Returns `false` for a vacant or out-of-range index.
     #[must_use]
-    pub fn begin_close(&mut self, index: usize) -> bool {
+    pub(crate) fn begin_close(&mut self, index: usize) -> bool {
         let Some(occupant) = self.entries.get_mut(index).and_then(|entry| entry.as_mut()) else {
             return false;
         };
@@ -283,7 +288,7 @@ impl Slots {
     /// instant exactly at the deadline expires nothing. Each yielded slot is
     /// already vacant and its stream is owned by the caller, so the next
     /// [`Slots::acquire`] claims the lowest free slot for a new connection.
-    pub fn take_expired(&mut self, now: Instant) -> impl Iterator<Item = TcpStream> + use<> {
+    pub(crate) fn take_expired(&mut self, now: Instant) -> impl Iterator<Item = TcpStream> + use<> {
         let mut expired: [Option<TcpStream>; MAX_CONNECTIONS] = std::array::from_fn(|_| None);
         for (index, entry) in self.entries.iter_mut().enumerate() {
             if entry
@@ -301,14 +306,14 @@ impl Slots {
     /// The number of occupied slots.
     #[cfg(test)]
     #[must_use]
-    pub const fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.len
     }
 
     /// Whether no slot is occupied.
     #[cfg(test)]
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.len == 0
     }
 }

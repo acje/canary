@@ -35,10 +35,10 @@ use std::net::SocketAddr;
 
 /// The number of records the queue holds, a power of two so the ring index is a
 /// mask.
-pub const QUEUE_SLOTS: usize = 256;
+pub(crate) const QUEUE_SLOTS: usize = 256;
 
 /// The bytes reserved for one rendered record.
-pub const SLOT_BYTES: usize = 512;
+pub(crate) const SLOT_BYTES: usize = 512;
 
 const SLOT_MASK: usize = QUEUE_SLOTS - 1;
 
@@ -87,7 +87,7 @@ const _: () = assert!(MAX_SINK_FAILURE_BYTES <= SLOT_BYTES);
 
 /// The severity a record carries, the only input to the filter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Level {
+pub(crate) enum Level {
     /// Informational lifecycle events.
     Info,
     /// Recoverable degradations that the operator should see by default.
@@ -134,7 +134,7 @@ impl LogFilter {
     /// does not name a severity, including the empty string and comma-separated
     /// directive lists, yields [`FilterParseKind::Unrecognized`].
     #[must_use]
-    pub fn parse(raw: Option<&str>) -> FilterParse {
+    pub(crate) fn parse(raw: Option<&str>) -> FilterParse {
         let Some(raw) = raw else {
             return FilterParse(FilterParseKind::Absent);
         };
@@ -170,7 +170,7 @@ impl LogFilter {
 /// filter is [`FilterParse::into_filter_and_notice`], so a filter chosen from an
 /// unrecognised value cannot be applied without also recording its notice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FilterParse(FilterParseKind);
+pub(crate) struct FilterParse(FilterParseKind);
 
 /// The private interpretation behind [`FilterParse`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -189,7 +189,7 @@ impl FilterParse {
     /// yields [`LogFilter::Info`] together with [`Record::FilterUnrecognised`], so
     /// choosing the filter and emitting the notice are one decision.
     #[must_use]
-    pub const fn into_filter_and_notice(self) -> (LogFilter, Option<Record>) {
+    pub(crate) const fn into_filter_and_notice(self) -> (LogFilter, Option<Record>) {
         match self.0 {
             FilterParseKind::Absent => (LogFilter::Info, None),
             FilterParseKind::Accepted(filter) => (filter, None),
@@ -248,7 +248,7 @@ pub enum Record {
 impl Record {
     /// The severity this record carries.
     #[must_use]
-    pub const fn level(self) -> Level {
+    pub(crate) const fn level(self) -> Level {
         match self {
             Self::Startup { .. } | Self::Tick(_) | Self::Shutdown(_) => Level::Info,
             Self::FilterUnrecognised => Level::Warn,
@@ -290,7 +290,7 @@ pub enum QueueOutcome {
 /// The outcome of one [`LogQueue::consume_front`] call.
 #[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConsumeOutcome {
+pub(crate) enum ConsumeOutcome {
     /// The cursor advanced by the accepted byte count, which may be zero on an
     /// empty queue.
     Advanced,
@@ -384,7 +384,7 @@ impl LogQueue {
     ///
     /// Returns `None` when the queue is empty.
     #[must_use]
-    pub fn unwritten_front(&self) -> Option<&[u8]> {
+    pub(crate) fn unwritten_front(&self) -> Option<&[u8]> {
         if self.len == 0 {
             return None;
         }
@@ -405,7 +405,7 @@ impl LogQueue {
     /// that removes the last record resets it. The `len == 0` guard below
     /// therefore cannot observe a stale cursor, and `lengths[head] -
     /// front_offset` cannot underflow.
-    pub fn consume_front(&mut self, written: usize) -> ConsumeOutcome {
+    pub(crate) fn consume_front(&mut self, written: usize) -> ConsumeOutcome {
         if self.len == 0 {
             return if written == 0 {
                 ConsumeOutcome::Advanced

@@ -30,7 +30,7 @@ use super::{ConsumeOutcome, LogQueue};
 /// records even when the sink accepts a whole slot each time. Exhaustion:
 /// [`drain`] returns [`DrainOutcome::Moved`] and the reactor retries after
 /// [`LOG_RETRY`]. Evidence: `max_ops_budget_stops_early`.
-pub const SINK_MAX_OPS: usize = 16;
+pub(crate) const SINK_MAX_OPS: usize = 16;
 
 /// The most bytes one [`drain`] turn accepts.
 ///
@@ -39,7 +39,7 @@ pub const SINK_MAX_OPS: usize = 16;
 /// quarter of the 256 KiB ring, so one turn cannot monopolise the reactor.
 /// Exhaustion: [`drain`] returns [`DrainOutcome::Moved`] and the remainder
 /// stays queued. Evidence: `max_bytes_budget_stops_early`.
-pub const SINK_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const SINK_MAX_BYTES: usize = 64 * 1024;
 
 /// The delay the reactor leaves between turns that made no progress.
 ///
@@ -48,7 +48,7 @@ pub const SINK_MAX_BYTES: usize = 64 * 1024;
 /// Limit: one second, short enough that a reader that resumes is served promptly
 /// and long enough that a closed pipe costs no measurable CPU. Exhaustion: the
 /// retry repeats; a stalled turn drops nothing.
-pub const LOG_RETRY: Duration = Duration::from_secs(1);
+pub(crate) const LOG_RETRY: Duration = Duration::from_secs(1);
 
 /// The wall-clock bound on each one-shot flush of the process.
 ///
@@ -98,9 +98,9 @@ pub enum DrainOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DrainBudget {
     /// The most write attempts the turn makes.
-    pub max_ops: usize,
+    pub(crate) max_ops: usize,
     /// The most bytes the turn accepts.
-    pub max_bytes: usize,
+    pub(crate) max_bytes: usize,
 }
 
 impl DrainBudget {
