@@ -1,0 +1,57 @@
+[advisories]
+yanked = "deny"
+unsound = "all"
+unmaintained = "all"
+unused-ignored-advisory = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0446", reason = "actix-http 3.9.0 from the legacy actix-web 4.9.0 baseline lock; fix is actix-http >= 3.20.2, reachable only by a lock refresh barred in M01; actix stack removed in M03" },
+    { id = "RUSTSEC-2026-0448", reason = "actix-http 3.9.0 from the legacy baseline lock; fix is actix-http >= 3.20.1, reachable only by a lock refresh barred in M01; actix stack removed in M03" },
+    { id = "RUSTSEC-2026-0455", reason = "actix-http 3.9.0 from the legacy baseline lock; fix is actix-http >= 3.20.3, reachable only by a lock refresh barred in M01; actix stack removed in M03" },
+    { id = "RUSTSEC-2026-0552", reason = "actix-http 3.9.0 from the legacy baseline lock; fix is actix-http >= 3.21.1, reachable only by a lock refresh barred in M01; actix stack removed in M03" },
+    { id = "RUSTSEC-2026-0553", reason = "actix-http 3.9.0 from the legacy baseline lock; fix is actix-http >= 3.21.3, reachable only by a lock refresh barred in M01; actix stack removed in M03" },
+    { id = "RUSTSEC-2026-0554", reason = "actix-http 3.9.0 from the legacy baseline lock; fix is actix-http >= 3.21.2, reachable only by a lock refresh barred in M01; actix stack removed in M03" },
+    { id = "RUSTSEC-2026-0447", reason = "actix-web 4.9.0 from the legacy baseline lock; fix is actix-web >= 4.18.2 with actix-http >= 3.20.1, a lock refresh barred in M01; actix stack removed in M03" },
+    { id = "RUSTSEC-2026-0007", reason = "bytes 1.8.0 pulled by the actix baseline lock; fix is bytes >= 1.11.1, a lock refresh barred in M01; crate leaves the graph with actix in M03" },
+    { id = "RUSTSEC-2026-0594", reason = "cookie 0.16.2 required by actix-web 4.9.0 (^0.16); fix is cookie >= 0.18.3, reachable only with an actix-web upgrade barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0258", reason = "h2 0.3.26 required by actix-http 3.9.0 (^0.3); fix is h2 >= 0.4.16, reachable only with an actix-http upgrade barred in M01; removed in M03" },
+    { id = "RUSTSEC-2024-0402", reason = "hashbrown 0.15.0 via the actix baseline lock; fix is hashbrown >= 0.15.1, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0542", reason = "humantime 2.1.0 via env_logger 0.11.5; advisory reports no safe upgrade; env_logger leaves the graph in M06 (in-house bounded log sink)" },
+    { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15 is compile-time-only macro support in the actix proc-macro chain; advisory reports no safe upgrade; removed with actix in M03" },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils 0.1.0 via futures-util 0.3.31 in the actix chain; advisory reports no safe upgrade; removed with actix in M03" },
+    { id = "RUSTSEC-2026-0097", reason = "rand 0.8.5 via actix baseline lock; fix is rand >= 0.8.6, a lock refresh barred in M01; canary installs no custom rand logger; removed in M03" },
+    { id = "RUSTSEC-2026-0009", reason = "time 0.3.36 via cookie/actix; fix is time >= 0.3.47, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2025-0023", reason = "tokio 1.41.0 dragged in by actix-rt; fix is tokio >= 1.44.2, a lock refresh barred in M01; no async runtime survives M03" },
+    { id = "RUSTSEC-2026-0386", reason = "tokio 1.41.0 dragged in by actix-rt; fix is tokio >= 1.53.3, a lock refresh barred in M01; no async runtime survives M03" },
+    { id = "RUSTSEC-2026-0592", reason = "url 2.5.4 is the highest lockable release under rustc 1.100; fix is url >= 2.5.9, barred by the MSRV-aware resolver; url leaves the graph in M03/M05 (hand-written head parser)" },
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13.2 via actix-http compression features; fix is zstd ^0.13.4, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0395", reason = "zstd-safe 7.2.1 via actix-http compression features; fix is zstd-safe ^7.4.0, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0397", reason = "zstd-safe 7.2.1 via actix-http compression features; fix is zstd-safe ^7.4.0, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0399", reason = "zstd-safe 7.2.1 via actix-http compression features; fix is zstd-safe ^7.4.0, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0400", reason = "zstd-safe 7.2.1 via actix-http compression features; fix is zstd-safe ^7.4.0, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0401", reason = "zstd-safe 7.2.1 via actix-http compression features; fix is zstd-safe ^7.4.0, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0402", reason = "zstd-safe 7.2.1 via actix-http compression features; fix is zstd-safe ^7.4.0, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7.2.1 via actix-http compression features; fix is zstd-safe ^7.4.0, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0404", reason = "zstd-safe 7.2.1 via actix-http compression features; fix is zstd-safe ^7.4.0, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0406", reason = "zstd-safe 7.2.1 via actix-http compression features; fix is zstd-safe ^7.4.0, a lock refresh barred in M01; removed in M03" },
+    { id = "RUSTSEC-2026-0410", reason = "zstd-sys 2.0.13 wasm32 allocation shim, unreachable on this native-only target; fix is zstd-sys >= 2.1.2, a lock refresh barred in M01; removed in M03" },
+]
+
+[bans]
+multiple-versions = "deny"
+skip = [
+    { name = "windows-sys", version = "0.52.0", reason = "Windows-only target crate pinned by the actix baseline lock; coexists with 0.59.0; never compiled on the darwin/linux targets this repo builds; removed with actix in M03" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+]

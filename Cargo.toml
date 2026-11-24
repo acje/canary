@@ -2,7 +2,19 @@
 name = "canary"
 version = "0.50.0"
 authors = ["Anders Jensen <anders.c.jensen@gmail.com>"]
-edition = "2021"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+
+[lints.rust]
+unused_must_use = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+undocumented_unsafe_blocks = "deny"
 
 [dependencies]
 actix-web = "4"
