@@ -4,11 +4,11 @@ use std::env::VarError;
 use std::fmt;
 
 use crate::log::{LogFilter, Record};
-use crate::port::{ListenPort, PortError};
+use crate::port::{PortError, PortRequest};
 
 /// The configuration the process needs before it binds a listener.
 ///
-/// `PORT` is the only fatal input: [`ListenPort::from_env`] rejects a missing,
+/// `PORT` is the only fatal input: [`PortRequest::from_env`] rejects a missing,
 /// non-numeric, or out-of-range value with [`ConfigError::Port`]. `RUST_LOG` is
 /// bounded and non-fatal: [`LogFilter::parse`] recognises exactly `off`, `error`,
 /// `warn`, and `info`, defaults an absent value to [`LogFilter::Info`] with no
@@ -20,7 +20,7 @@ use crate::port::{ListenPort, PortError};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimePlan {
     /// The port to bind, where zero asks the operating system for one.
-    pub listen: ListenPort,
+    pub listen: PortRequest,
     /// The severity filter every record is written through.
     pub filter: LogFilter,
     /// The record the filter choice requires, present only when `RUST_LOG`
@@ -43,14 +43,14 @@ impl RuntimePlan {
     /// text, or not a decimal value in `0..=65535`.
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_inputs(
-            ListenPort::from_env(),
+            PortRequest::from_env(),
             parse_var(std::env::var("RUST_LOG")).as_deref(),
         )
     }
 
     /// Pairs the port decision with the filter decision and its notice.
     fn from_inputs(
-        listen: Result<ListenPort, PortError>,
+        listen: Result<PortRequest, PortError>,
         rust_log: Option<&str>,
     ) -> Result<Self, ConfigError> {
         let listen = listen.map_err(ConfigError::Port)?;
@@ -100,12 +100,12 @@ impl std::error::Error for ConfigError {}
 mod tests {
     use super::{ConfigError, RuntimePlan, parse_var};
     use crate::log::{Level, LogFilter, Record};
-    use crate::port::{ListenPort, Port, PortError};
+    use crate::port::{Port, PortError, PortRequest};
 
     #[test]
     fn absent_rust_log_defaults_the_filter_without_a_notice() {
-        let plan = RuntimePlan::from_inputs(Ok(ListenPort::Ephemeral), None).unwrap();
-        assert_eq!(plan.listen, ListenPort::Ephemeral);
+        let plan = RuntimePlan::from_inputs(Ok(PortRequest::Ephemeral), None).unwrap();
+        assert_eq!(plan.listen, PortRequest::Ephemeral);
         assert_eq!(plan.filter, LogFilter::Info);
         assert_eq!(plan.notice, None);
     }
@@ -123,7 +123,7 @@ mod tests {
 
         let invalid = std::env::VarError::NotUnicode(OsString::from_vec(vec![0xff]));
         let plan = RuntimePlan::from_inputs(
-            Ok(ListenPort::Ephemeral),
+            Ok(PortRequest::Ephemeral),
             parse_var(Err(invalid)).as_deref(),
         )
         .unwrap();
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn an_unrecognised_rust_log_defaults_the_filter_with_one_warn_notice() {
-        let plan = RuntimePlan::from_inputs(Ok(ListenPort::Ephemeral), Some("garbage")).unwrap();
+        let plan = RuntimePlan::from_inputs(Ok(PortRequest::Ephemeral), Some("garbage")).unwrap();
         assert_eq!(plan.filter, LogFilter::Info);
         assert_eq!(plan.notice, Some(Record::FilterUnrecognised));
         assert_eq!(plan.notice.map(Record::level), Some(Level::Warn));
@@ -141,8 +141,8 @@ mod tests {
 
     #[test]
     fn accepted_filter_yields_no_notice() {
-        let plan = RuntimePlan::from_inputs(Ok(ListenPort::Ephemeral), Some("off")).unwrap();
-        assert_eq!(plan.listen, ListenPort::Ephemeral);
+        let plan = RuntimePlan::from_inputs(Ok(PortRequest::Ephemeral), Some("off")).unwrap();
+        assert_eq!(plan.listen, PortRequest::Ephemeral);
         assert_eq!(plan.filter, LogFilter::Off);
         assert_eq!(plan.notice, None);
     }
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn fixed_port_and_filter_travel_into_the_plan() {
         let plan = RuntimePlan::from_inputs(
-            Ok(ListenPort::Fixed(Port::parse("8080").unwrap())),
+            Ok(PortRequest::Fixed(Port::parse("8080").unwrap())),
             Some("warn"),
         )
         .unwrap();

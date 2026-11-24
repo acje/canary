@@ -55,18 +55,18 @@ impl From<Port> for u16 {
 
 /// The listener port requested by the environment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ListenPort {
+pub enum PortRequest {
     /// Ask the operating system for a free port.
     Ephemeral,
     /// Bind the named fixed port.
     Fixed(Port),
 }
 
-impl ListenPort {
+impl PortRequest {
     /// Resolves a raw `PORT` value, where `None` means the variable is unset.
     ///
     /// The decimal value zero, in any zero-padded spelling such as `"0"`,
-    /// `"00"`, or `"00000"`, selects [`ListenPort::Ephemeral`]; every other
+    /// `"00"`, or `"00000"`, selects [`PortRequest::Ephemeral`]; every other
     /// value must parse as a fixed [`Port`].
     ///
     /// # Errors
@@ -122,6 +122,12 @@ pub enum PortError {
     /// `PORT` is not made only of ASCII decimal digits.
     NonNumeric,
     /// `PORT` is decimal zero or greater than `65535`.
+    ///
+    /// Zero shares this variant on purpose: [`PortRequest::parse`] resolves
+    /// every all-zero spelling to [`PortRequest::Ephemeral`] before
+    /// [`Port::parse`] runs, so the zero case is reachable only from a caller
+    /// that bypasses the operator input, and a separate variant would force an
+    /// operator-visible stderr change on no operator path.
     OutOfRange,
 }
 
@@ -146,110 +152,122 @@ fn is_decimal_zero(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListenPort, Port, PortError};
+    use super::{Port, PortError, PortRequest};
 
-    fn fixed(raw: &str) -> ListenPort {
-        ListenPort::Fixed(Port::parse(raw).unwrap())
+    fn fixed(raw: &str) -> PortRequest {
+        PortRequest::Fixed(Port::parse(raw).unwrap())
     }
 
     #[test]
     fn raw_zero_is_ephemeral() {
-        assert_eq!(ListenPort::parse(Some("0")), Ok(ListenPort::Ephemeral));
+        assert_eq!(PortRequest::parse(Some("0")), Ok(PortRequest::Ephemeral));
     }
 
     #[test]
     fn zero_padded_zero_is_ephemeral() {
-        assert_eq!(ListenPort::parse(Some("00000")), Ok(ListenPort::Ephemeral));
+        assert_eq!(
+            PortRequest::parse(Some("00000")),
+            Ok(PortRequest::Ephemeral)
+        );
     }
 
     #[test]
     fn six_digit_zero_is_ephemeral() {
-        assert_eq!(ListenPort::parse(Some("000000")), Ok(ListenPort::Ephemeral));
+        assert_eq!(
+            PortRequest::parse(Some("000000")),
+            Ok(PortRequest::Ephemeral)
+        );
     }
 
     #[test]
     fn lowest_fixed_port_is_accepted() {
-        assert_eq!(ListenPort::parse(Some("1")), Ok(fixed("1")));
+        assert_eq!(PortRequest::parse(Some("1")), Ok(fixed("1")));
     }
 
     #[test]
     fn highest_fixed_port_is_accepted() {
-        assert_eq!(ListenPort::parse(Some("65535")), Ok(fixed("65535")));
+        assert_eq!(PortRequest::parse(Some("65535")), Ok(fixed("65535")));
     }
 
     #[test]
     fn port_above_range_is_rejected() {
-        assert_eq!(ListenPort::parse(Some("65536")), Err(PortError::OutOfRange));
+        assert_eq!(
+            PortRequest::parse(Some("65536")),
+            Err(PortError::OutOfRange)
+        );
     }
 
     #[test]
     fn overlong_digit_run_is_out_of_range() {
         assert_eq!(
-            ListenPort::parse(Some("123456")),
+            PortRequest::parse(Some("123456")),
             Err(PortError::OutOfRange)
         );
-        assert_eq!(ListenPort::parse(Some("99999")), Err(PortError::OutOfRange));
+        assert_eq!(
+            PortRequest::parse(Some("99999")),
+            Err(PortError::OutOfRange)
+        );
     }
 
     #[test]
     fn zero_padded_fixed_port_decodes_to_its_decimal_value() {
-        assert_eq!(ListenPort::parse(Some("000080")), Ok(fixed("80")));
+        assert_eq!(PortRequest::parse(Some("000080")), Ok(fixed("80")));
     }
 
     #[test]
     fn non_ascii_digits_are_non_numeric() {
-        assert_eq!(ListenPort::parse(Some("８０")), Err(PortError::NonNumeric));
+        assert_eq!(PortRequest::parse(Some("８０")), Err(PortError::NonNumeric));
     }
 
     #[test]
     fn negative_value_is_non_numeric() {
-        assert_eq!(ListenPort::parse(Some("-1")), Err(PortError::NonNumeric));
+        assert_eq!(PortRequest::parse(Some("-1")), Err(PortError::NonNumeric));
     }
 
     #[test]
     fn empty_value_is_empty() {
-        assert_eq!(ListenPort::parse(Some("")), Err(PortError::Empty));
+        assert_eq!(PortRequest::parse(Some("")), Err(PortError::Empty));
     }
 
     #[test]
     fn leading_space_is_non_numeric() {
-        assert_eq!(ListenPort::parse(Some(" 80")), Err(PortError::NonNumeric));
+        assert_eq!(PortRequest::parse(Some(" 80")), Err(PortError::NonNumeric));
     }
 
     #[test]
     fn plus_sign_is_non_numeric() {
-        assert_eq!(ListenPort::parse(Some("+80")), Err(PortError::NonNumeric));
+        assert_eq!(PortRequest::parse(Some("+80")), Err(PortError::NonNumeric));
     }
 
     #[test]
     fn trailing_junk_is_non_numeric() {
-        assert_eq!(ListenPort::parse(Some("80x")), Err(PortError::NonNumeric));
+        assert_eq!(PortRequest::parse(Some("80x")), Err(PortError::NonNumeric));
     }
 
     #[test]
     fn hex_prefix_is_non_numeric() {
-        assert_eq!(ListenPort::parse(Some("0x50")), Err(PortError::NonNumeric));
+        assert_eq!(PortRequest::parse(Some("0x50")), Err(PortError::NonNumeric));
     }
 
     #[test]
     fn underscore_is_non_numeric() {
-        assert_eq!(ListenPort::parse(Some("8_0")), Err(PortError::NonNumeric));
+        assert_eq!(PortRequest::parse(Some("8_0")), Err(PortError::NonNumeric));
     }
 
     #[test]
     fn leading_zeroes_are_decimal() {
-        assert_eq!(ListenPort::parse(Some("0080")), Ok(fixed("80")));
+        assert_eq!(PortRequest::parse(Some("0080")), Ok(fixed("80")));
     }
 
     #[test]
     fn missing_value_is_missing() {
-        assert_eq!(ListenPort::parse(None), Err(PortError::Missing));
+        assert_eq!(PortRequest::parse(None), Err(PortError::Missing));
     }
 
     #[test]
     fn absent_variable_reports_missing() {
         assert_eq!(
-            ListenPort::parse_var(Err(std::env::VarError::NotPresent)),
+            PortRequest::parse_var(Err(std::env::VarError::NotPresent)),
             Err(PortError::Missing)
         );
     }
@@ -257,7 +275,7 @@ mod tests {
     #[test]
     fn unicode_value_parses_like_any_other() {
         assert_eq!(
-            ListenPort::parse_var(Ok("0080".to_owned())),
+            PortRequest::parse_var(Ok("0080".to_owned())),
             Ok(fixed("80"))
         );
     }
@@ -269,7 +287,7 @@ mod tests {
 
         let invalid = std::env::VarError::NotUnicode(OsString::from_vec(vec![0x80]));
         assert_eq!(
-            ListenPort::parse_var(Err(invalid)),
+            PortRequest::parse_var(Err(invalid)),
             Err(PortError::NotUnicode)
         );
     }
@@ -287,7 +305,7 @@ mod tests {
 
     #[test]
     fn ephemeral_binds_port_zero() {
-        assert_eq!(ListenPort::Ephemeral.port(), 0);
+        assert_eq!(PortRequest::Ephemeral.port(), 0);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-use crate::port::{ListenPort, PortError};
+use crate::port::{PortError, PortRequest};
 
 /// The one argument that asks for a health check instead of a served process.
 const HEALTH_CHECK: &str = "--health-check";
@@ -148,14 +148,14 @@ impl std::error::Error for ProbeFailure {}
 /// status line. The whole probe is therefore bounded by [`CONNECT_TIMEOUT`]
 /// plus [`READ_TIMEOUT`].
 pub fn check() -> ProbeOutcome {
-    check_listen(ListenPort::from_env())
+    check_listen(PortRequest::from_env())
 }
 
 /// Probes the listener that the environment's `PORT` answer names.
-fn check_listen(listen: Result<ListenPort, PortError>) -> ProbeOutcome {
+fn check_listen(listen: Result<PortRequest, PortError>) -> ProbeOutcome {
     let port = match listen {
-        Ok(ListenPort::Fixed(port)) => port,
-        Ok(ListenPort::Ephemeral) => {
+        Ok(PortRequest::Fixed(port)) => port,
+        Ok(PortRequest::Ephemeral) => {
             return ProbeOutcome::Unhealthy(ProbeFailure::EphemeralPort);
         }
         Err(_) => return ProbeOutcome::Unhealthy(ProbeFailure::PortAbsent),
@@ -217,7 +217,7 @@ fn judge_status(stream: &mut TcpStream) -> ProbeOutcome {
 #[cfg(test)]
 mod tests {
     use super::{Invocation, ProbeFailure, ProbeOutcome, READ_TIMEOUT, check_listen};
-    use crate::port::{ListenPort, Port, PortError};
+    use crate::port::{Port, PortError, PortRequest};
     use std::ffi::OsString;
     use std::io::{self, Read, Write};
     use std::net::{Shutdown, TcpListener};
@@ -240,8 +240,8 @@ mod tests {
         ]
     }
 
-    fn fixed_port(port: u16) -> ListenPort {
-        ListenPort::Fixed(Port::try_from(port).unwrap())
+    fn fixed_port(port: u16) -> PortRequest {
+        PortRequest::Fixed(Port::try_from(port).unwrap())
     }
 
     /// Probes a loopback listener that answers one request with `reply`.
@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn an_ephemeral_port_names_the_unreachable_port_choice() {
         assert_eq!(
-            check_listen(Ok(ListenPort::Ephemeral)),
+            check_listen(Ok(PortRequest::Ephemeral)),
             ProbeOutcome::Unhealthy(ProbeFailure::EphemeralPort)
         );
     }
