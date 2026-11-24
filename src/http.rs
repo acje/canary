@@ -438,7 +438,7 @@ fn build(status: &[u8], extra: &[u8], body: &[&[u8]]) -> Wire {
             Segment::Length => builder.push_decimal(body_len),
         }
     }
-    let head_len = builder.len();
+    let head_len = builder.len;
     for part in body.iter().copied() {
         builder.push(part);
     }
@@ -503,10 +503,6 @@ impl Builder {
             remaining /= 10;
         }
         self.push(&scratch[..length]);
-    }
-
-    const fn len(&self) -> usize {
-        self.len
     }
 
     fn finish(self, head_len: usize) -> Wire {
