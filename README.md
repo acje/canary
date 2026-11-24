@@ -23,8 +23,9 @@ The head is judged before the method and target are dispatched, so a `400` or
 `431` outranks the method and target rows, and `405` outranks the `404` for a
 target other than `/`. A connection that sends nothing, or whose request is
 still unfinished when the connection deadline passes, is closed without a
-reply. A `200` reply always carries the body `Canary <version> is alive!`
-terminated by CRLF, and `Content-Length` names its exact byte count.
+reply. A `GET /` reply carries the body `Canary <version> is alive!`,
+CRLF-terminated, and `Content-Length` names its exact byte count; a `HEAD /`
+reply carries the same headers, `Content-Length` included, and no body.
 
 ## `PORT`
 
