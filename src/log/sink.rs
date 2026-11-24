@@ -71,12 +71,13 @@ pub enum DrainOutcome {
         /// The bytes removed from the queue this turn.
         bytes: usize,
     },
-    /// The sink accepted nothing further without reporting an error, or the
-    /// budget admitted no work.
+    /// No byte reached the kernel in this turn.
     ///
-    /// Nothing left the queue. A record the sink refused and a record the budget
-    /// never offered both stay at the front, with no byte of either reaching the
-    /// kernel.
+    /// The sink accepted nothing further without reporting an error, or the
+    /// budget admitted no work. A record the sink refused and a record the budget
+    /// never offered both stay at the front, and a turn that wrote part of a
+    /// record before the sink refused more reports [`DrainOutcome::Progress`]
+    /// with the bytes that did reach the kernel.
     Stalled,
     /// The sink reported an error; the record it was offered is still queued.
     Failed {
@@ -107,8 +108,11 @@ impl DrainBudget {
 /// The turn re-reads [`LogStore::unwritten_front`] before every attempt and
 /// offers the front record once, so a short write resumes where it stopped.
 /// [`DrainOutcome::Progress`] counts what the store actually released, never
-/// what the sink was offered. A full or closed sink leaves the record at the
-/// front and returns [`DrainOutcome::Stalled`] or [`DrainOutcome::Failed`].
+/// what the sink was offered. Bytes a turn released before a full sink refused
+/// more are reported as [`DrainOutcome::Progress`] and the remainder stays at
+/// the front; a turn that reached the kernel with nothing reports
+/// [`DrainOutcome::Stalled`], and a hard error returns [`DrainOutcome::Failed`]
+/// with the offered record still queued.
 ///
 /// A [`ConsumeOutcome::Rejected`] answer, or a write that claims more bytes than
 /// it was offered, is an internal contract violation and returns
@@ -140,7 +144,7 @@ pub fn drain(store: &mut LogStore, sink: &mut impl Write, budget: DrainBudget) -
         let queued = store.len();
         ops += 1;
         match sink.write(offer) {
-            Ok(0) => return DrainOutcome::Stalled,
+            Ok(0) => break,
             Ok(accepted) if accepted > offered => {
                 return DrainOutcome::Failed {
                     kind: ErrorKind::InvalidInput,
@@ -158,9 +162,14 @@ pub fn drain(store: &mut LogStore, sink: &mut impl Write, budget: DrainBudget) -
                 }
             }
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
-            Err(error) if error.kind() == ErrorKind::WouldBlock => return DrainOutcome::Stalled,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => break,
             Err(error) => return DrainOutcome::Failed { kind: error.kind() },
         }
+    }
+    if records == 0 && bytes == 0 {
+        DrainOutcome::Stalled
+    } else {
+        DrainOutcome::Progress { records, bytes }
     }
 }
 
@@ -219,6 +228,13 @@ impl NonblockingStdout {
     }
 }
 
+#[cfg(test)]
+impl NonblockingStdout {
+    fn from_owned(descriptor: ManuallyDrop<File>) -> Self {
+        Self(descriptor)
+    }
+}
+
 impl Write for NonblockingStdout {
     /// Writes `buffer` straight to the descriptor.
     ///
@@ -241,11 +257,16 @@ impl Write for NonblockingStdout {
 #[cfg(test)]
 mod tests {
     use super::{
-        DrainBudget, DrainOutcome, SHUTDOWN_DRAIN, SINK_MAX_BYTES, SINK_MAX_OPS, drain, drain_until,
+        DrainBudget, DrainOutcome, NonblockingStdout, SHUTDOWN_DRAIN, SINK_MAX_BYTES, SINK_MAX_OPS,
+        drain, drain_until,
     };
     use crate::log::{LogFilter, LogStore, Record, WriteOutcome};
     use std::collections::VecDeque;
-    use std::io::{self, ErrorKind, Write};
+    use std::fs::File;
+    use std::io::{self, ErrorKind, Read, Write};
+    use std::mem::ManuallyDrop;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
     use std::time::Instant;
 
     enum Step {
@@ -400,6 +421,35 @@ mod tests {
     }
 
     #[test]
+    fn a_full_pipe_after_a_whole_record_reports_progress_then_stalls() {
+        let mut store = store_with(2);
+        let record_len = front_len(&store);
+        let mut sink = FakeWriter::new([
+            Step::Accepted(record_len),
+            Step::Refused(ErrorKind::WouldBlock),
+            Step::Refused(ErrorKind::WouldBlock),
+        ]);
+        assert_eq!(
+            drain(&mut store, &mut sink, DrainBudget::DEFAULT),
+            DrainOutcome::Progress {
+                records: 1,
+                bytes: record_len
+            }
+        );
+        assert_eq!(sink.call_count(), 2);
+        assert_eq!(store.len(), 1);
+        assert_eq!(front_len(&store), record_len);
+        assert_eq!(
+            drain(&mut store, &mut sink, DrainBudget::DEFAULT),
+            DrainOutcome::Stalled
+        );
+        assert_eq!(sink.call_count(), 3);
+        assert_eq!(store.len(), 1);
+        assert_eq!(front_len(&store), record_len);
+        assert_eq!(store.dropped(), 0);
+    }
+
+    #[test]
     fn hard_error_is_failed_with_the_record_retained() {
         let mut store = store_with(1);
         let record_len = front_len(&store);
@@ -417,19 +467,28 @@ mod tests {
 
     #[test]
     fn a_write_that_claims_more_than_it_was_offered_fails_without_consuming() {
-        let mut store = store_with(1);
-        let record_len = front_len(&store);
-        let mut sink = FakeWriter::new([Step::Accepted(record_len + 1)]);
-        assert_eq!(
-            drain(&mut store, &mut sink, DrainBudget::DEFAULT),
-            DrainOutcome::Failed {
-                kind: ErrorKind::InvalidInput
-            }
-        );
-        assert_eq!(sink.call_count(), 1);
-        assert_eq!(store.len(), 1);
-        assert_eq!(store.dropped(), 0);
-        assert_eq!(front_len(&store), record_len);
+        let truncating = DrainBudget {
+            max_ops: 1,
+            max_bytes: 8,
+        };
+        assert!(truncating.max_bytes < front_len(&store_with(1)));
+        for budget in [truncating, DrainBudget::DEFAULT] {
+            let mut store = store_with(1);
+            let record_len = front_len(&store);
+            let offered = record_len.min(budget.max_bytes);
+            let mut sink = FakeWriter::new([Step::Accepted(offered + 1)]);
+            assert_eq!(
+                drain(&mut store, &mut sink, budget),
+                DrainOutcome::Failed {
+                    kind: ErrorKind::InvalidInput
+                }
+            );
+            assert_eq!(sink.offered(0), Some(offered));
+            assert_eq!(sink.call_count(), 1);
+            assert_eq!(store.len(), 1);
+            assert_eq!(store.dropped(), 0);
+            assert_eq!(front_len(&store), record_len);
+        }
     }
 
     #[test]
@@ -569,5 +628,36 @@ mod tests {
         assert!(store.is_empty());
         assert_eq!(sink.accepted, expected_bytes);
         assert_eq!(sink.calls, expected_bytes);
+    }
+
+    #[test]
+    fn a_short_accept_reports_exactly_the_bytes_the_peer_reads() {
+        let (writer, mut reader) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let mut sink =
+            NonblockingStdout::from_owned(ManuallyDrop::new(File::from(OwnedFd::from(writer))));
+
+        let head = b"header";
+        assert_eq!(sink.write(head).unwrap(), head.len());
+
+        let offer = vec![b'x'; 1 << 20];
+        let accepted = sink.write(&offer).unwrap();
+        assert!(accepted < offer.len());
+
+        let mut peer = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => peer.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) => panic!("the peer reported {error}"),
+            }
+        }
+
+        assert_eq!(peer.len(), head.len() + accepted);
+        assert!(peer.starts_with(head));
     }
 }
