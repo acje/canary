@@ -104,6 +104,12 @@ impl Slots {
     ///
     /// The slot's absolute deadline is `now` plus [`super::CONNECTION_DEADLINE`].
     /// Returns `None` when every slot is occupied.
+    ///
+    /// The returned index names its slot only until that slot is released: the
+    /// next acquire reuses the lowest free slot, so an index held across a
+    /// release can name a fresh occupant. [`Slots::take_expired`] is the one
+    /// sweep that cannot meet that hazard, because it yields an owned stream
+    /// rather than an index.
     #[must_use]
     pub fn acquire(&mut self, stream: TcpStream, now: Instant) -> Option<usize> {
         let index = self.entries.iter().position(Option::is_none)?;
