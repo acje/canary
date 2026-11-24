@@ -17,12 +17,12 @@ use super::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS, SLOT_METADATA_BYTE
 /// The reply the reactor will write once a read finishes.
 ///
 /// A variant names the reply-plan call to make; it never holds rendered bytes,
-/// so a stored pending reply stays [`Copy`] and independent of the plan's
+/// so a stored reply choice stays [`Copy`] and independent of the plan's
 /// lifetime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Pending {
+pub enum ReplyChoice {
     /// Answer the parsed request through `ResponsePlan::reply`.
-    Answer(Request),
+    Matched(Request),
     /// Answer with the fixed `400` reply.
     BadRequest,
     /// Answer with the fixed `431` reply.
@@ -59,7 +59,7 @@ enum Connection {
         len: usize,
     },
     Writing {
-        pending: Pending,
+        pending: ReplyChoice,
         cursor: usize,
         reply_len: usize,
     },
@@ -189,7 +189,7 @@ impl Slots {
     /// `total_len` is the byte length of the plan reply the reactor selected.
     /// Returns `false` when `index` is not a reading slot.
     #[must_use]
-    pub fn begin_write(&mut self, index: usize, pending: Pending, total_len: usize) -> bool {
+    pub fn begin_write(&mut self, index: usize, pending: ReplyChoice, total_len: usize) -> bool {
         let Some(occupant) = self.entries.get_mut(index).and_then(|entry| entry.as_mut()) else {
             return false;
         };
@@ -232,7 +232,7 @@ impl Slots {
     ///
     /// Returns `None` when `index` is not a writing slot.
     #[must_use]
-    pub fn pending(&self, index: usize) -> Option<Pending> {
+    pub fn pending(&self, index: usize) -> Option<ReplyChoice> {
         match &self.entries.get(index)?.as_ref()?.connection {
             Connection::Writing { pending, .. } => Some(*pending),
             Connection::Reading { .. } | Connection::Closing => None,
@@ -307,7 +307,7 @@ impl Default for Slots {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pending, Phase, Slots, WriteProgress};
+    use super::{Phase, ReplyChoice, Slots, WriteProgress};
     use crate::http::{MalformedKind, Method, ParseOutcome, Target};
     use crate::serve::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS};
     use mio::net::TcpStream;
@@ -552,7 +552,7 @@ mod tests {
             panic!("expected a complete request, got {outcome:?}");
         };
         assert_eq!(slots.head_room(index), Some(HEAD_BYTES - head.len()));
-        assert!(slots.begin_write(index, Pending::Answer(request), 120));
+        assert!(slots.begin_write(index, ReplyChoice::Matched(request), 120));
         assert_eq!(slots.head_room(index), None);
         assert_eq!(slots.cursor(index), Some(0));
         assert_eq!(
@@ -574,9 +574,9 @@ mod tests {
             panic!("expected a complete request, got {outcome:?}");
         };
         let total = 120;
-        assert!(slots.begin_write(index, Pending::Answer(request), total));
+        assert!(slots.begin_write(index, ReplyChoice::Matched(request), total));
         assert_eq!(slots.phase(index), Some(Phase::Writing));
-        assert_eq!(slots.pending(index), Some(Pending::Answer(request)));
+        assert_eq!(slots.pending(index), Some(ReplyChoice::Matched(request)));
         assert_eq!(slots.cursor(index), Some(0));
         assert_eq!(
             slots.advance_written(index, 100),
@@ -587,7 +587,7 @@ mod tests {
             Some(WriteProgress::Finished)
         );
         assert_eq!(slots.cursor(index), Some(total));
-        assert!(!slots.begin_write(index, Pending::BadRequest, total));
+        assert!(!slots.begin_write(index, ReplyChoice::BadRequest, total));
     }
 
     #[test]
@@ -611,7 +611,7 @@ mod tests {
         assert_eq!(slots.advance_written(0, 1), None);
         assert_eq!(slots.pending(0), None);
         assert_eq!(slots.phase(0), None);
-        assert!(!slots.begin_write(0, Pending::TooLarge, 1));
+        assert!(!slots.begin_write(0, ReplyChoice::TooLarge, 1));
         assert!(!slots.begin_close(0));
         assert_eq!(slots.len(), 0);
         assert!(slots.is_empty());

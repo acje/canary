@@ -40,7 +40,7 @@ use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, ParseOutcome, Reply, Response
 use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DRAIN, LOG_RETRY};
 use crate::log::{Counters, LogFilter, LogQueue, QueueOutcome, Record};
 
-use super::slots::{Pending, Phase, Slots, WriteProgress};
+use super::slots::{Phase, ReplyChoice, Slots, WriteProgress};
 use super::{HEAD_BYTES, MAX_CONNECTIONS};
 
 /// The poll token of the listening socket.
@@ -820,10 +820,10 @@ impl Reactor {
             match outcome {
                 ParseOutcome::Incomplete => {}
                 ParseOutcome::Complete(request) => {
-                    return self.begin_write(index, Pending::Answer(request));
+                    return self.begin_write(index, ReplyChoice::Matched(request));
                 }
-                ParseOutcome::Malformed(_) => return self.reject(index, Pending::BadRequest),
-                ParseOutcome::TooLarge => return self.reject(index, Pending::TooLarge),
+                ParseOutcome::Malformed(_) => return self.reject(index, ReplyChoice::BadRequest),
+                ParseOutcome::TooLarge => return self.reject(index, ReplyChoice::TooLarge),
             }
         }
         Ok(read_any)
@@ -839,7 +839,7 @@ impl Reactor {
         if self.slots.head_room(index) == Some(HEAD_BYTES) {
             return self.begin_close_and_release(index);
         }
-        self.reject(index, Pending::BadRequest)
+        self.reject(index, ReplyChoice::BadRequest)
     }
 
     /// Moves a reading slot into a write of `pending` and asks for writability.
@@ -847,7 +847,7 @@ impl Reactor {
     /// The reply length is read from the same [`reply_bytes`] call the write path
     /// uses, so the bytes stored as the write's total and the bytes written can
     /// never disagree.
-    fn begin_write(&mut self, index: usize, pending: Pending) -> Result<bool, ServeError> {
+    fn begin_write(&mut self, index: usize, pending: ReplyChoice) -> Result<bool, ServeError> {
         let total_len = reply_bytes(&self.plan, pending).len();
         if !self.slots.begin_write(index, pending, total_len) {
             return Ok(false);
@@ -857,7 +857,7 @@ impl Reactor {
     }
 
     /// Moves a reading slot into a rejected reply and counts the rejection.
-    fn reject(&mut self, index: usize, pending: Pending) -> Result<bool, ServeError> {
+    fn reject(&mut self, index: usize, pending: ReplyChoice) -> Result<bool, ServeError> {
         if !self.begin_write(index, pending)? {
             return Ok(false);
         }
@@ -906,7 +906,7 @@ impl Reactor {
         match self.slots.advance_written(index, written) {
             Some(WriteProgress::Finished) => {
                 self.release(index)?;
-                if matches!(pending, Pending::Answer(_)) {
+                if matches!(pending, ReplyChoice::Matched(_)) {
                     self.served = self.served.saturating_add(1);
                 }
                 Ok(true)
@@ -1067,14 +1067,14 @@ impl Reactor {
 }
 
 /// The bytes a stored pending reply writes.
-fn reply_bytes(plan: &ResponsePlan, pending: Pending) -> &[u8] {
+fn reply_bytes(plan: &ResponsePlan, pending: ReplyChoice) -> &[u8] {
     match pending {
-        Pending::Answer(request) => match plan.reply(request) {
+        ReplyChoice::Matched(request) => match plan.reply(request) {
             Reply::Full(bytes) => bytes,
             Reply::HeadOnly(head) => head.head(),
         },
-        Pending::BadRequest => plan.bad_request(),
-        Pending::TooLarge => plan.too_large(),
+        ReplyChoice::BadRequest => plan.bad_request(),
+        ReplyChoice::TooLarge => plan.too_large(),
     }
 }
 
