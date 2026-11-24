@@ -228,22 +228,6 @@ impl Slots {
         })
     }
 
-    /// Whether the writing slot `index` has written its whole reply.
-    ///
-    /// A slot that is not writing is never finished.
-    #[must_use]
-    pub fn finished(&self, index: usize) -> bool {
-        let Some(occupant) = self.entries.get(index).and_then(|entry| entry.as_ref()) else {
-            return false;
-        };
-        matches!(
-            &occupant.connection,
-            Connection::Writing {
-                cursor, reply_len, ..
-            } if cursor >= reply_len
-        )
-    }
-
     /// The reply pending in the writing slot `index`.
     ///
     /// Returns `None` when `index` is not a writing slot.
@@ -312,18 +296,6 @@ impl Slots {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.len == 0
-    }
-
-    /// The number of free slots.
-    #[must_use]
-    pub const fn free_slots(&self) -> usize {
-        MAX_CONNECTIONS - self.len
-    }
-
-    /// Whether every slot is occupied.
-    #[must_use]
-    pub const fn is_full(&self) -> bool {
-        self.len == MAX_CONNECTIONS
     }
 }
 
@@ -394,8 +366,6 @@ mod tests {
             assert_eq!(slots.acquire(stream, now), Some(expected));
         }
         assert_eq!(slots.len(), MAX_CONNECTIONS);
-        assert_eq!(slots.free_slots(), 0);
-        assert!(slots.is_full());
         let (stream, peer) = fixture.stream();
         peers.push(peer);
         assert_eq!(slots.acquire(stream, now), None);
@@ -414,7 +384,6 @@ mod tests {
         assert_eq!((first_index, second_index), (0, 1));
         slots.release(first_index);
         assert_eq!(slots.len(), 1);
-        assert_eq!(slots.free_slots(), MAX_CONNECTIONS - 1);
         assert_eq!(slots.phase(first_index), None);
         assert_eq!(slots.phase(second_index), Some(Phase::Reading));
         let (replacement, _replacement_peer) = fixture.stream();
@@ -608,17 +577,16 @@ mod tests {
         assert!(slots.begin_write(index, Pending::Answer(request), total));
         assert_eq!(slots.phase(index), Some(Phase::Writing));
         assert_eq!(slots.pending(index), Some(Pending::Answer(request)));
-        assert!(!slots.finished(index));
+        assert_eq!(slots.cursor(index), Some(0));
         assert_eq!(
             slots.advance_written(index, 100),
             Some(WriteProgress::Remaining)
         );
-        assert!(!slots.finished(index));
         assert_eq!(
             slots.advance_written(index, 100),
             Some(WriteProgress::Finished)
         );
-        assert!(slots.finished(index));
+        assert_eq!(slots.cursor(index), Some(total));
         assert!(!slots.begin_write(index, Pending::BadRequest, total));
     }
 
@@ -633,7 +601,7 @@ mod tests {
         assert_eq!(slots.phase(index), Some(Phase::Closing));
         assert_eq!(slots.read_into(index, b"GET / HTTP/1.1\r\n\r\n"), None);
         assert_eq!(slots.pending(index), None);
-        assert!(!slots.finished(index));
+        assert_eq!(slots.advance_written(index, 0), None);
     }
 
     #[test]
@@ -645,7 +613,6 @@ mod tests {
         assert_eq!(slots.phase(0), None);
         assert!(!slots.begin_write(0, Pending::TooLarge, 1));
         assert!(!slots.begin_close(0));
-        assert!(!slots.finished(0));
         assert_eq!(slots.len(), 0);
         assert!(slots.is_empty());
     }
