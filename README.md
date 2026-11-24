@@ -14,15 +14,21 @@ four crates: `libc`, `mio`, `signal-hook`, and its `signal-hook-registry`.
 | --- | --- | --- |
 | `GET` | `/` | `200` with the liveness body |
 | `HEAD` | `/` | `200` with the headers and no body |
-| any | other target | `404` |
-| other | `/` | `405` with `Allow: GET, HEAD` |
+| `GET`, `HEAD` | any target other than `/` | `404`, headers only for `HEAD` |
+| any other method | any target | `405` with `Allow: GET, HEAD` |
+| any | a malformed request line, or a head that ends at EOF before its terminator | `400` |
+| any | a head that cannot be terminated within `1024` bytes | `431` |
 
-The body is always `Canary <version> is alive!` terminated by CRLF, and
-`Content-Length` names its exact byte count.
+The head is judged before the method and target are dispatched, so a `400` or
+`431` outranks the method and target rows, and `405` outranks the `404` for a
+target other than `/`. The body is always `Canary <version> is alive!`
+terminated by CRLF, and `Content-Length` names its exact byte count.
 
 ## `PORT`
 
-`PORT` is the only fatal input.
+`PORT` is the only fatal input. The image supplies the default `PORT=8080`, so a
+forgotten `-e PORT` in a container serves on `8080` instead of failing with
+`78`; the binary itself has no default and still rejects an absent `PORT`.
 
 - Absent, non-numeric, or outside `1..=65535`: the process exits `78` before it
   binds.
@@ -99,8 +105,8 @@ PORT=8080 cargo run --release -- --health-check
 ## Container
 
 The image is a pinned two-stage build: `rust:1.100-bookworm` compiles with
-`cargo build --release --locked`, and `debian:bookworm-slim` carries only the
-binary and runs as UID `10001`.
+`cargo build --release --locked`, and `debian:bookworm-slim` carries the binary
+and its MIT license, and runs as UID `10001`.
 
 ```sh
 podman build --format docker -t canary .

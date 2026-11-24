@@ -290,15 +290,16 @@ impl Canary {
     /// signal would reach a live reactor rather than a process still starting.
     /// The claimed port is released before the child spawns, so the connection
     /// may reach a concurrent process's listener instead; a caller that signals
-    /// the child afterwards retries that lost claim.
-    fn start_silently(env: &[(&str, &OsStr)]) -> Option<Self> {
+    /// the child afterwards retries that lost claim. `Err` carries the lost
+    /// claim's diagnostics; any other startup death panics.
+    fn start_silently(env: &[(&str, &OsStr)]) -> Result<Self, String> {
         let port = claim_port();
         let port_text = port.to_string();
         let mut full_env = Vec::from(env);
         full_env.push(("PORT", OsStr::new(&port_text)));
         let mut canary = Self::spawn(&full_env);
         canary.port = Some(port);
-        canary.await_accept().then_some(canary)
+        canary.await_accept().map(|()| canary)
     }
 
     /// The loopback address the readiness poll dials.
@@ -310,31 +311,31 @@ impl Canary {
     ///
     /// Each attempt carries the time left before [`DEADLINE`], so a foreign
     /// listener with a full accept queue cannot block the poll past the
-    /// deadline. Returns `false` when the child exits without a listener of its
-    /// own, which [`lost_its_claim`] attributes to the released claim and the
-    /// caller retries. A child that stays alive without accepting is a genuine
-    /// readiness failure and panics with the exit status, its signal, and both
-    /// captured streams.
-    fn await_accept(&mut self) -> bool {
+    /// deadline. `Ok(())` means the port accepted the connection. `Err` carries
+    /// the readiness diagnostic when the child exited `78` without a listener of
+    /// its own, which [`lost_claim_before_ready`] attributes to the released
+    /// claim and the caller retries. Every other exit panics with the same
+    /// diagnostic: no signal of this test has reached the child yet, so a signal
+    /// death here is a real startup failure. A child that stays alive without
+    /// accepting is the deadline failure and panics the same way.
+    fn await_accept(&mut self) -> Result<(), String> {
         let deadline = Instant::now() + DEADLINE;
         let mut last_error = None;
         loop {
             let left = remaining(deadline);
             if !left.is_zero() {
                 match TcpStream::connect_timeout(&self.probe_address(), left) {
-                    Ok(_) => return true,
+                    Ok(_) => return Ok(()),
                     Err(error) => last_error = Some(error),
                 }
             }
             let status = self.child.try_wait().expect("the child status is readable");
             if let Some(status) = status {
-                if lost_its_claim(status) {
-                    return false;
+                let failure = self.readiness_failure(Some(status), last_error.as_ref());
+                if lost_claim_before_ready(status) {
+                    return Err(failure);
                 }
-                panic!(
-                    "{}",
-                    self.readiness_failure(Some(status), last_error.as_ref())
-                );
+                panic!("{failure}");
             }
             assert!(
                 Instant::now() < deadline,
@@ -432,32 +433,44 @@ fn run_args_to_exit(env: &[(&str, &OsStr)], args: &[&str]) -> Finished {
 
 /// Starts the binary silently, requests shutdown, and collects what it printed.
 ///
-/// `None` means the silent start lost its claimed port before the reactor was
-/// ready, which the caller retries; the shutdown request is only sent to a
-/// child that accepted the readiness connection.
-fn silence_until_shutdown(filter: &str) -> Option<Finished> {
+/// `Err` means the silent start lost its claimed port before the reactor was
+/// ready, carrying that attempt's readiness diagnostic; the caller retries. The
+/// shutdown request is only sent to a child that accepted the readiness
+/// connection.
+fn silence_until_shutdown(filter: &str) -> Result<Finished, String> {
     let env = [("RUST_LOG", OsStr::new(filter))];
     let mut canary = Canary::start_silently(&env)?;
     canary.signal("TERM");
     let status = canary.wait(Instant::now() + EXIT_DEADLINE);
     let deadline = Instant::now() + DEADLINE;
-    Some(Finished {
+    Ok(Finished {
         status,
         stdout: canary.stdout_until_closed(deadline),
         stderr: canary.stderr_until_closed(deadline),
     })
 }
 
-/// Whether a silent start lost its claimed port to another process.
+/// Whether a silent start lost its claimed port before it reached readiness.
 ///
 /// [`Canary::start_silently`] releases its claim before the child spawns, so a
-/// concurrent process may bind that port first. The child then either exits 78
-/// without a listener of its own, or — when the foreign listener answered the
-/// readiness connection — is killed by the shutdown signal before its handlers
-/// exist, which the operating system reports as a signal rather than a status.
-/// A start that never reaches readiness has no outcome at all; the caller
-/// retries that too. Every other outcome belongs to the filter under test.
-fn lost_its_claim(status: ExitStatus) -> bool {
+/// concurrent process may bind that port first and the child then exits `78`,
+/// naming the bind as rejected configuration. `78` is the only status a caller
+/// retries: a signal death or any other status this early is a real startup
+/// failure, and the caller reports it with the diagnostic it carries.
+fn lost_claim_before_ready(status: ExitStatus) -> bool {
+    status.code() == Some(78)
+}
+
+/// Whether a signalled silent start lost its claimed port instead of shutting
+/// down.
+///
+/// By the time the caller signals the child, the readiness connection has been
+/// accepted, so a foreign listener may have answered it while the child was
+/// still starting. The shutdown signal then either kills the child before its
+/// handlers exist — the operating system reports a signal rather than a status
+/// — or reaches a child whose own bind failed with `78`. Both outcomes belong to
+/// the lost claim; every other outcome belongs to the filter under test.
+fn lost_claim_after_signal(status: ExitStatus) -> bool {
     matches!(status.code(), None | Some(78))
 }
 
@@ -625,6 +638,11 @@ fn a_health_check_against_a_closed_port_fails_with_one_line() {
         "{:?}",
         finished.stderr
     );
+    assert!(
+        finished.stderr[0].contains("cannot read the probe reply"),
+        "{:?}",
+        finished.stderr
+    );
 }
 
 #[test]
@@ -711,9 +729,10 @@ fn a_silencing_filter_prints_nothing_and_still_exits_cleanly() {
     for filter in ["off", "warn"] {
         let mut outcome = silence_until_shutdown(filter);
         for _ in 1..SILENT_ATTEMPTS {
-            let retry = outcome
-                .as_ref()
-                .is_none_or(|finished| lost_its_claim(finished.status));
+            let retry = match &outcome {
+                Err(_) => true,
+                Ok(finished) => lost_claim_after_signal(finished.status),
+            };
             if !retry {
                 break;
             }
@@ -723,8 +742,18 @@ fn a_silencing_filter_prints_nothing_and_still_exits_cleanly() {
             status,
             stdout,
             stderr,
-        } = outcome.expect("a silent start kept its claimed port within the attempts");
-        assert_eq!(status.code(), Some(0), "RUST_LOG={filter}");
+        } = match outcome {
+            Ok(finished) => finished,
+            Err(lost) => panic!(
+                "RUST_LOG={filter}: no silent start reached readiness within {SILENT_ATTEMPTS} \
+                 attempts: {lost}"
+            ),
+        };
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "RUST_LOG={filter}: status={status:?} stdout={stdout:?} stderr={stderr:?}"
+        );
         assert!(stdout.is_empty(), "RUST_LOG={filter}: {stdout:?}");
         assert!(stderr.is_empty(), "RUST_LOG={filter}: {stderr:?}");
     }

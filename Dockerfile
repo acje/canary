@@ -8,11 +8,17 @@ COPY src ./src
 COPY tests ./tests
 RUN cargo build --release --locked
 
-# The runtime image carries the binary and nothing else: no apt step, no shell
-# tools, and no account database.
+# The runtime stage adds no packages to the slim base, creates no user, and
+# copies no account database; it carries the binary and the license, and
+# nothing else.
 FROM docker.io/library/debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
 
 COPY --from=build /src/target/release/canary /usr/local/bin/canary
+
+# The MIT notice must accompany the binary wherever it is distributed:
+# Cargo.toml declares `license = "MIT"`, so the image carries the LICENSE file
+# beside the binary.
+COPY LICENSE /usr/local/share/canary/LICENSE
 
 # A numeric UID needs no passwd entry, so the image creates no user and copies
 # no /etc/passwd. 10001 sits outside Debian's system-account range, so it cannot
