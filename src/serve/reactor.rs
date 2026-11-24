@@ -844,12 +844,28 @@ impl Reactor {
     }
 
     /// Releases every occupied slot whose absolute deadline `now` has passed.
+    ///
+    /// The sweep hands back the owned stream of each expired slot, so the
+    /// deregistration cannot be confused with a fresh occupant's, and each
+    /// released slot counts one rejection. A listener that capacity deregistered
+    /// is registered again and its accept backlog marked pending, exactly as
+    /// [`Reactor::release`] does for any other release.
     fn expire(&mut self, now: Instant) -> Result<bool, ServeError> {
-        let mut expired = [0usize; MAX_CONNECTIONS];
-        let count = self.slots.expired(now, &mut expired);
-        for &index in &expired[..count] {
-            self.release(index)?;
+        let reopen = !self.listener_registered;
+        let mut count = 0;
+        for (_index, mut stream) in self.slots.take_expired(now) {
+            self.poll
+                .registry()
+                .deregister(&mut stream)
+                .map_err(|error| ServeError::Deregister(error.kind()))?;
             self.rejected = self.rejected.saturating_add(1);
+            count += 1;
+        }
+        if count > 0 {
+            self.set_listener_registered(true)?;
+            if reopen {
+                self.accept_backlog = true;
+            }
         }
         Ok(count > 0)
     }

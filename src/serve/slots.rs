@@ -263,27 +263,31 @@ impl Slots {
         true
     }
 
-    /// Fills `out` with the slots past their deadline at `now`.
+    /// Removes every occupant past its deadline at `now` and yields it.
     ///
-    /// Scans every slot once and returns the number of indices written. A slot
-    /// is expired only when `now` is strictly after its absolute deadline, so an
-    /// instant exactly at the deadline is not expired.
-    ///
-    /// The returned indices stay valid only until the next [`Slots::acquire`] or
-    /// [`Slots::release`]: acquire reuses the lowest free slot, so a stale index
-    /// can name a fresh connection. Act on a sweep before mutating the table.
-    #[must_use]
-    pub fn expired(&self, now: Instant, out: &mut [usize; MAX_CONNECTIONS]) -> usize {
-        let mut count = 0;
-        for (index, entry) in self.entries.iter().enumerate() {
-            if let Some(occupant) = entry
-                && now > occupant.expires_at
+    /// Scans every slot once and yields `(index, stream)` in ascending slot
+    /// order for each occupant whose absolute deadline `now` is strictly after,
+    /// so an instant exactly at the deadline expires nothing. Each yielded slot
+    /// is already vacant and its stream is owned by the caller, so a yielded
+    /// index cannot name a fresh occupant: the next [`Slots::acquire`] claims
+    /// the lowest free slot for a new connection.
+    pub fn take_expired(
+        &mut self,
+        now: Instant,
+    ) -> impl Iterator<Item = (usize, TcpStream)> + use<> {
+        let mut expired: [Option<(usize, TcpStream)>; MAX_CONNECTIONS] =
+            std::array::from_fn(|_| None);
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            if entry
+                .as_ref()
+                .is_some_and(|occupant| now > occupant.expires_at)
+                && let Some(occupant) = entry.take()
             {
-                out[count] = index;
-                count += 1;
+                expired[index] = Some((index, occupant.stream));
+                self.len -= 1;
             }
         }
-        count
+        expired.into_iter().flatten()
     }
 
     /// The number of occupied slots.
@@ -492,16 +496,16 @@ mod tests {
         let accepted = Instant::now();
         let (stream, _peer) = fixture.stream();
         let index = slots.acquire(stream, accepted).unwrap();
-        let mut out = [0usize; MAX_CONNECTIONS];
-        assert_eq!(slots.expired(accepted + CONNECTION_DEADLINE, &mut out), 0);
         assert_eq!(
-            slots.expired(
-                accepted + CONNECTION_DEADLINE + Duration::from_nanos(1),
-                &mut out
-            ),
-            1
+            slots.take_expired(accepted + CONNECTION_DEADLINE).count(),
+            0
         );
-        assert_eq!(out[0], index);
+        let mut expired =
+            slots.take_expired(accepted + CONNECTION_DEADLINE + Duration::from_nanos(1));
+        let (taken, _stream) = expired.next().unwrap();
+        assert_eq!(taken, index);
+        assert!(expired.next().is_none());
+        assert!(slots.is_empty());
     }
 
     #[test]
@@ -512,22 +516,17 @@ mod tests {
         let (stream, _peer) = fixture.stream();
         let index = slots.acquire(stream, accepted).unwrap();
         let late = accepted + CONNECTION_DEADLINE + Duration::from_nanos(1);
-        let mut out = [0usize; MAX_CONNECTIONS];
-        assert_eq!(slots.expired(late, &mut out), 1);
-        assert_eq!(out[0], index);
-        slots.release(out[0]);
+        let (taken, _stream) = slots.take_expired(late).next().unwrap();
+        assert_eq!(taken, index);
+        assert!(slots.is_empty());
         let (replacement, _replacement_peer) = fixture.stream();
         assert_eq!(slots.acquire(replacement, late), Some(index));
-        let mut fresh = [0usize; MAX_CONNECTIONS];
-        assert_eq!(slots.expired(late, &mut fresh), 0);
-        assert_eq!(
-            slots.expired(
-                late + CONNECTION_DEADLINE + Duration::from_nanos(1),
-                &mut fresh
-            ),
-            1
-        );
-        assert_eq!(fresh[0], index);
+        assert_eq!(slots.take_expired(late).count(), 0);
+        let (fresh, _fresh_stream) = slots
+            .take_expired(late + CONNECTION_DEADLINE + Duration::from_nanos(1))
+            .next()
+            .unwrap();
+        assert_eq!(fresh, index);
     }
 
     #[test]
