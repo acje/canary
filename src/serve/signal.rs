@@ -1,10 +1,4 @@
 //! The shutdown self-pipe the reactor's poller watches.
-//!
-//! [`ShutdownSignals`] owns the read end of a pipe and the write end a
-//! registered handler writes one byte to. The read end is the mio source
-//! [`Reactor::new`](super::reactor::Reactor::new) registers at
-//! [`TOKEN_SIGNAL`](super::reactor::TOKEN_SIGNAL), so a signal wakes the poller
-//! and the reactor reads the request where an ordinary turn can act on it.
 
 use std::io::{self, PipeWriter, Read};
 use std::os::fd::OwnedFd;

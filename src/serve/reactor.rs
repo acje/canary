@@ -713,8 +713,9 @@ impl Reactor {
     /// its deadline instead of earning its `400`.
     ///
     /// A read that answers [`ErrorKind::WouldBlock`] ends the visit, one that
-    /// answers [`ErrorKind::Interrupted`] retries within the remaining budget,
-    /// and every other read error closes and releases the slot without a reply.
+    /// answers [`ErrorKind::Interrupted`] retries without consuming the byte
+    /// budget, and every other read error closes and releases the slot without a
+    /// reply.
     /// The kind of that error is deliberately not distinguished: the connection
     /// is unusable either way, and neither path moves the served or rejected
     /// counters.

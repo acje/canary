@@ -55,13 +55,14 @@ pub const LOG_RETRY: Duration = Duration::from_secs(1);
 /// Owner: the process's two flush points (M06/M07), which pass
 /// `Instant::now() + FLUSH_DEADLINE` to their [`drain_until`] calls. Scope: the
 /// startup drain that releases the boot line before the listener is polled, and
-/// the final drain that releases whatever the shutdown left queued. Units: wall-clock time. Limit: 250 ms, which is enough for a
-/// reader that is still consuming and short enough that startup and shutdown
-/// stay responsive. Exhaustion: the drain stops at the deadline and the
-/// remainder stays queued; at startup the serving turns offer it again, and at
-/// shutdown it is abandoned with the process. [`LogQueue::dropped`] counts
-/// queue refusals only, so a leftover record never advances it. The returned
-/// [`DrainOutcome`] reports the short flush. Evidence:
+/// the final drain that releases whatever the shutdown left queued. Units:
+/// wall-clock time. Limit: 250 ms, which is enough for a reader that is still
+/// consuming and short enough that startup and shutdown stay responsive.
+/// Exhaustion: the drain stops at the deadline and the remainder stays queued;
+/// at startup the serving turns offer it again, and at shutdown it is abandoned
+/// with the process. [`LogQueue::dropped`] counts queue refusals only, so a
+/// leftover record never advances it. The returned [`DrainOutcome`] reports the
+/// short flush. Evidence:
 /// `drain_until_with_an_elapsed_deadline_performs_exactly_one_drain`.
 pub const FLUSH_DEADLINE: Duration = Duration::from_millis(250);
 
