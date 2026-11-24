@@ -527,8 +527,8 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_HEAD_BYTES, MAX_VERSION_BYTES, MalformedKind, Method, ParseOutcome, Reply, Request,
-        ResponsePlan, Target, parse_head,
+        LIVENESS_PREFIX, LIVENESS_SUFFIX, MAX_HEAD_BYTES, MAX_VERSION_BYTES, MalformedKind, Method,
+        ParseOutcome, Reply, Request, ResponsePlan, Target, parse_head,
     };
 
     const OK_HEAD: &[u8] = concat!(
@@ -715,6 +715,11 @@ mod tests {
     fn head_with_a_suffix_after_the_terminator_is_complete() {
         let mut head = Vec::from(&b"GET / HTTP/1.1\r\n\r\n"[..]);
         head.resize(head.len() + 1040, b'x');
+        assert!(
+            head.len() > MAX_HEAD_BYTES,
+            "the offer exceeds the window: {} bytes",
+            head.len()
+        );
         assert!(matches!(parse_head(&head), ParseOutcome::Complete(_)));
     }
 
@@ -892,6 +897,19 @@ mod tests {
         assert_eq!(
             parse_head(b"GET / HTTP/1.1\rHost: x\r\n\r\n"),
             ParseOutcome::Malformed(MalformedKind::MissingTerminator)
+        );
+    }
+
+    #[test]
+    fn version_at_the_limit_is_accepted() {
+        let version = "1".repeat(MAX_VERSION_BYTES);
+        assert_eq!(version.len(), MAX_VERSION_BYTES);
+        let plan = ResponsePlan::new(&version);
+        let reply = plan.ok_get();
+        assert_eq!(declared_body_len(reply), body_of(reply).len());
+        assert_eq!(
+            body_of(reply).len(),
+            LIVENESS_PREFIX.len() + MAX_VERSION_BYTES + LIVENESS_SUFFIX.len()
         );
     }
 

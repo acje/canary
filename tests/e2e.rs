@@ -8,10 +8,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -23,18 +25,19 @@ const DEADLINE: Duration = Duration::from_secs(5);
 /// The deadline a signalled process is allowed to exit within.
 const EXIT_DEADLINE: Duration = Duration::from_secs(2);
 
-/// The settle a filter-only test allows the process to reach its serving loop.
+/// The wait a tick test allows for the first aggregate record after a request.
 ///
-/// The filter those tests set suppresses the startup line, the only output that
-/// would mark readiness, and no port is needed to observe an empty stream, so
-/// the test waits a short fixed period and then signals the process.
-const SETTLE: Duration = Duration::from_millis(200);
+/// The reactor emits at most one tick per second, and its first tick is due as
+/// soon as the counters move, so this bound covers the interval plus a margin.
+const TICK_WAIT: Duration = Duration::from_millis(1200);
 
 /// The liveness body the binary must answer with, built from the build version.
 const LIVENESS: &[u8] = concat!("Canary ", env!("CARGO_PKG_VERSION"), " is alive!\r\n").as_bytes();
 
-/// The `Content-Length` line the liveness reply declares.
-const LIVENESS_LENGTH: &[u8] = b"Content-Length: 25\r\n";
+/// The `Content-Length` line the liveness reply must declare.
+fn liveness_length_line() -> Vec<u8> {
+    format!("Content-Length: {}\r\n", LIVENESS.len()).into_bytes()
+}
 
 /// The packages `Cargo.lock` may not name.
 const FORBIDDEN_PACKAGES: [&str; 6] = [
@@ -63,7 +66,7 @@ fn command(env: &[(&str, &OsStr)]) -> Command {
     command
 }
 
-/// The lines `stream` prints, delivered as each one ends.
+/// The lines `stream` prints, each delivered whole with its line terminator.
 fn pump(stream: impl Read + Send + 'static) -> Receiver<String> {
     let (sender, receiver) = mpsc::channel();
     let _ = thread::spawn(move || {
@@ -77,7 +80,7 @@ fn pump(stream: impl Read + Send + 'static) -> Receiver<String> {
             if read == 0 {
                 break;
             }
-            if sender.send(line.trim_end().to_owned()).is_err() {
+            if sender.send(line.clone()).is_err() {
                 break;
             }
         }
@@ -113,6 +116,7 @@ fn lines_until_closed(receiver: &Receiver<String>, deadline: Instant) -> Vec<Str
 /// The port named by the `bind=0.0.0.0:<port>` field of a startup line.
 fn startup_port(line: &str) -> u16 {
     let field = line
+        .trim_end()
         .split(' ')
         .find(|field| field.starts_with("bind="))
         .expect("the startup line names the bound address");
@@ -134,6 +138,34 @@ fn wait_bounded(child: &mut Child, deadline: Instant) -> ExitStatus {
         );
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// The value of the `served=` field of a record line.
+fn served_count(line: &str) -> u64 {
+    line.split(' ')
+        .find_map(|field| field.strip_prefix("served="))
+        .expect("the record names its served count")
+        .parse()
+        .expect("the served count is decimal")
+}
+
+/// The quoted version specification a dependency entry names.
+fn pinned_version(entry: &str) -> &str {
+    let value = entry
+        .split_once(" = ")
+        .expect("a dependency entry is an assignment")
+        .1;
+    let spec = match value.strip_prefix('"') {
+        Some(rest) => rest,
+        None => {
+            value
+                .split_once("version = \"")
+                .expect("a table entry names its version")
+                .1
+        }
+    };
+    let end = spec.find('"').expect("the version specification is quoted");
+    &spec[..end]
 }
 
 /// Whether `haystack` holds `needle` as a contiguous run of bytes.
@@ -176,6 +208,15 @@ fn request(port: u16, head: &[u8]) -> Vec<u8> {
     received
 }
 
+/// Claims a loopback port and releases it for the child to bind.
+fn claim_port() -> u16 {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("the test claims a loopback port");
+    listener
+        .local_addr()
+        .expect("the claimed port is readable")
+        .port()
+}
+
 /// A running canary process, killed when the value is dropped.
 struct Canary {
     child: Child,
@@ -214,11 +255,48 @@ impl Canary {
         canary
     }
 
-    /// Spawns the binary that prints no startup line and lets it settle.
+    /// Spawns the binary that prints no startup line and waits for the reactor.
+    ///
+    /// The filter these tests set suppresses the startup line, so the listener
+    /// is the readiness oracle instead: the process installs its shutdown
+    /// handlers before it binds, so a connection the listener accepts proves the
+    /// signal would reach a live reactor rather than a process still starting.
     fn start_silently(env: &[(&str, &OsStr)]) -> Self {
-        let canary = Self::spawn(env);
-        thread::sleep(SETTLE);
+        let port = claim_port();
+        let port_text = port.to_string();
+        let mut full_env = Vec::from(env);
+        full_env.push(("PORT", OsStr::new(&port_text)));
+        let mut canary = Self::spawn(&full_env);
+        canary.port = Some(port);
+        canary.await_accept();
         canary
+    }
+
+    /// Polls the claimed port until the reactor accepts a connection.
+    ///
+    /// A refused connection is retried within [`DEADLINE`] because the child
+    /// may not have bound yet. A failure reports the exit status, its signal,
+    /// and both captured streams, so a death before the listener existed is
+    /// diagnosable rather than a bare mismatch.
+    fn await_accept(&mut self) {
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            match TcpStream::connect(("127.0.0.1", self.port())) {
+                Ok(_) => return,
+                Err(error) if Instant::now() >= deadline => {
+                    let status = self.child.try_wait().expect("the child status is readable");
+                    let signal = status.as_ref().and_then(ExitStatus::signal);
+                    let stdout: Vec<String> = self.stdout.try_iter().collect();
+                    let stderr: Vec<String> = self.stderr.try_iter().collect();
+                    panic!(
+                        "the reactor accepted no connection before {DEADLINE:?}: \
+                         last_error={error} exited={status:?} signal={signal:?} \
+                         stdout={stdout:?} stderr={stderr:?}"
+                    );
+                }
+                Err(_) => thread::sleep(Duration::from_millis(5)),
+            }
+        }
     }
 
     /// The port the startup line named.
@@ -244,6 +322,11 @@ impl Canary {
     /// The next startup-or-later line the process prints.
     fn next_stdout(&self, deadline: Instant) -> Option<String> {
         next_line(&self.stdout, deadline)
+    }
+
+    /// The next standard-output line if one arrives before `deadline`.
+    fn next_stdout_within(&self, deadline: Instant) -> Option<String> {
+        self.stdout.recv_timeout(remaining(deadline)).ok()
     }
 
     /// Every remaining standard-output line until the process closes it.
@@ -284,6 +367,28 @@ fn run_to_exit(env: &[(&str, &OsStr)]) -> Finished {
 }
 
 #[test]
+fn the_liveness_body_is_the_frozen_twenty_five_bytes() {
+    let expected = format!("Canary {} is alive!\r\n", env!("CARGO_PKG_VERSION"));
+    assert_eq!(LIVENESS, expected.as_bytes());
+    assert_eq!(LIVENESS.len(), 25, "{}", String::from_utf8_lossy(LIVENESS));
+}
+
+#[test]
+fn the_startup_line_ends_with_a_carriage_return_line_feed() {
+    let canary = Canary::spawn(&[("PORT", OsStr::new("0"))]);
+    let line = canary
+        .next_stdout(Instant::now() + DEADLINE)
+        .expect("the process printed its startup line");
+    assert!(line.contains("kind=startup"), "{line:?}");
+    assert!(line.ends_with("\r\n"), "{line:?}");
+    assert_eq!(
+        line.trim_end(),
+        &line[..line.len() - 2],
+        "the line terminator is exactly one CRLF: {line:?}"
+    );
+}
+
+#[test]
 fn the_root_replies_with_the_exact_liveness_body() {
     let canary = Canary::start(&[("PORT", OsStr::new("0"))]);
     let reply = request(
@@ -296,7 +401,7 @@ fn the_root_replies_with_the_exact_liveness_body() {
         String::from_utf8_lossy(&reply)
     );
     assert!(
-        contains(&reply, LIVENESS_LENGTH),
+        contains(&reply, &liveness_length_line()),
         "{}",
         String::from_utf8_lossy(&reply)
     );
@@ -316,7 +421,7 @@ fn the_head_reply_carries_the_headers_without_a_body() {
         String::from_utf8_lossy(&reply)
     );
     assert!(
-        contains(&reply, LIVENESS_LENGTH),
+        contains(&reply, &liveness_length_line()),
         "{}",
         String::from_utf8_lossy(&reply)
     );
@@ -344,6 +449,35 @@ fn other_targets_and_methods_are_refused() {
         "{}",
         String::from_utf8_lossy(&not_allowed)
     );
+    assert!(
+        contains(&not_allowed, b"Allow: GET, HEAD\r\n"),
+        "{}",
+        String::from_utf8_lossy(&not_allowed)
+    );
+}
+
+#[test]
+fn a_served_request_is_followed_by_an_aggregate_tick() {
+    let canary = Canary::start(&[("PORT", OsStr::new("0"))]);
+    let reply = request(
+        canary.port(),
+        b"GET / HTTP/1.1\r\nHost: canary\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        reply.starts_with(b"HTTP/1.1 200 OK\r\n"),
+        "{}",
+        String::from_utf8_lossy(&reply)
+    );
+    let deadline = Instant::now() + TICK_WAIT;
+    let mut tick = None;
+    while let Some(line) = canary.next_stdout_within(deadline) {
+        if line.contains("kind=tick") {
+            tick = Some(line);
+            break;
+        }
+    }
+    let tick = tick.expect("the reactor reported a tick after serving a request");
+    assert!(served_count(&tick) >= 1, "{tick}");
 }
 
 #[test]
@@ -397,7 +531,7 @@ fn a_shutdown_signal_ends_the_process_cleanly() {
 #[test]
 fn a_silencing_filter_prints_nothing_and_still_exits_cleanly() {
     for filter in ["off", "warn"] {
-        let env = [("PORT", OsStr::new("0")), ("RUST_LOG", OsStr::new(filter))];
+        let env = [("RUST_LOG", OsStr::new(filter))];
         let mut canary = Canary::start_silently(&env);
         canary.signal("TERM");
         let status = canary.wait(Instant::now() + EXIT_DEADLINE);
@@ -419,7 +553,7 @@ fn an_unrecognised_filter_earns_exactly_one_notice() {
     let mut canary = Canary::start(&env);
     let deadline = Instant::now() + DEADLINE;
     assert_eq!(
-        canary.next_stdout(deadline).as_deref(),
+        canary.next_stdout(deadline).as_deref().map(str::trim_end),
         Some("level=warn kind=filter_default")
     );
     canary.signal("TERM");
@@ -448,7 +582,7 @@ fn a_non_unicode_filter_earns_the_notice_rather_than_silence() {
     let mut canary = Canary::start(&env);
     let deadline = Instant::now() + DEADLINE;
     assert_eq!(
-        canary.next_stdout(deadline).as_deref(),
+        canary.next_stdout(deadline).as_deref().map(str::trim_end),
         Some("level=warn kind=filter_default")
     );
     canary.signal("TERM");
@@ -493,12 +627,22 @@ fn the_lock_graph_and_manifest_hold_only_the_declared_dependencies() {
             entries.push(line);
         }
     }
-    assert_eq!(entries.len(), DECLARED_DEPENDENCIES.len(), "{entries:?}");
-    for (entry, name) in entries.iter().zip(DECLARED_DEPENDENCIES) {
-        let (key, version) = entry
-            .split_once(" = ")
-            .expect("a dependency entry is an assignment");
-        assert_eq!(key, name, "{entries:?}");
-        assert!(version.contains("\"="), "{entry} is not exact-pinned");
+    let names: BTreeSet<&str> = entries
+        .iter()
+        .map(|entry| {
+            entry
+                .split_once(" = ")
+                .expect("a dependency entry is an assignment")
+                .0
+        })
+        .collect();
+    let declared: BTreeSet<&str> = DECLARED_DEPENDENCIES.into_iter().collect();
+    assert_eq!(names, declared, "{entries:?}");
+    for entry in &entries {
+        let spec = pinned_version(entry);
+        assert!(
+            spec.len() > 1 && spec.starts_with('='),
+            "{entry} is not exact-pinned"
+        );
     }
 }
