@@ -314,9 +314,9 @@ struct TickLedger {
     /// The instant of the last tick record, absent before the first one.
     last: Option<Instant>,
     /// The served count the last tick reported.
-    served: u64,
+    last_served: u64,
     /// The rejected count the last tick reported.
-    rejected: u64,
+    last_rejected: u64,
 }
 
 /// The single owner of the listener, the connection slots, the shutdown source,
@@ -492,7 +492,7 @@ impl Reactor {
 
     /// Whether the counters moved since the last tick record.
     fn tick_moved(&self) -> bool {
-        self.served != self.tick.served || self.rejected != self.tick.rejected
+        self.served != self.tick.last_served || self.rejected != self.tick.last_rejected
     }
 
     /// Waits for readiness and snapshots the tokens [`Reactor::turn`] acts on.
@@ -713,13 +713,13 @@ impl Reactor {
         self.tick.last = Some(now);
         match store.enqueue(filter, record) {
             QueueOutcome::Queued => {
-                self.tick.served = self.served;
-                self.tick.rejected = self.rejected;
+                self.tick.last_served = self.served;
+                self.tick.last_rejected = self.rejected;
                 true
             }
             QueueOutcome::Filtered => {
-                self.tick.served = self.served;
-                self.tick.rejected = self.rejected;
+                self.tick.last_served = self.served;
+                self.tick.last_rejected = self.rejected;
                 false
             }
             QueueOutcome::Dropped => false,
