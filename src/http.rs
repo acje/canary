@@ -79,7 +79,7 @@ pub enum Method {
 
 /// The request target classes the reply plan distinguishes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Target {
+pub enum RequestTarget {
     /// The target bytes are exactly `/`.
     Root,
     /// Every other target, including query, absolute-form, and traversal forms.
@@ -93,7 +93,7 @@ pub enum Target {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Request {
     method: Method,
-    target: Target,
+    target: RequestTarget,
 }
 
 impl Request {
@@ -105,7 +105,7 @@ impl Request {
 
     /// The exact-match request target class.
     #[must_use]
-    pub const fn target(self) -> Target {
+    pub const fn target(self) -> RequestTarget {
         self.target
     }
 }
@@ -152,7 +152,7 @@ pub enum ParseOutcome {
 ///
 /// Only the request line is parsed; every header line after it is ignored
 /// beyond the `\r\n` discipline that terminates the head. A target is
-/// [`Target::Root`] only when its bytes are exactly `/`.
+/// [`RequestTarget::Root`] only when its bytes are exactly `/`.
 #[must_use]
 pub fn parse_head(bytes: &[u8]) -> ParseOutcome {
     let window = &bytes[..bytes.len().min(MAX_HEAD_BYTES)];
@@ -267,10 +267,10 @@ const fn classify_method(token: &[u8]) -> Method {
     }
 }
 
-const fn classify_target(token: &[u8]) -> Target {
+const fn classify_target(token: &[u8]) -> RequestTarget {
     match token {
-        [b'/'] => Target::Root,
-        _ => Target::Other,
+        [b'/'] => RequestTarget::Root,
+        _ => RequestTarget::Other,
     }
 }
 
@@ -379,10 +379,10 @@ impl ResponsePlan {
     pub fn reply(&self, request: Request) -> Reply<'_> {
         match (request.method(), request.target()) {
             (Method::Other, _) => Reply::Full(self.method_not_allowed.full()),
-            (Method::Get, Target::Root) => Reply::Full(self.ok.full()),
-            (Method::Head, Target::Root) => Reply::HeadOnly(self.ok.head()),
-            (Method::Get, Target::Other) => Reply::Full(self.not_found.full()),
-            (Method::Head, Target::Other) => Reply::HeadOnly(self.not_found.head()),
+            (Method::Get, RequestTarget::Root) => Reply::Full(self.ok.full()),
+            (Method::Head, RequestTarget::Root) => Reply::HeadOnly(self.ok.head()),
+            (Method::Get, RequestTarget::Other) => Reply::Full(self.not_found.full()),
+            (Method::Head, RequestTarget::Other) => Reply::HeadOnly(self.not_found.head()),
         }
     }
 }
@@ -518,7 +518,7 @@ impl Builder {
 mod tests {
     use super::{
         LIVENESS_PREFIX, LIVENESS_SUFFIX, MAX_HEAD_BYTES, MAX_VERSION_BYTES, MalformedKind, Method,
-        ParseOutcome, Reply, Request, ResponsePlan, Target, parse_head,
+        ParseOutcome, Reply, Request, RequestTarget, ResponsePlan, parse_head,
     };
 
     const OK_HEAD: &[u8] = concat!(
@@ -627,14 +627,14 @@ mod tests {
     fn complete_root_get() {
         let request = complete(b"GET / HTTP/1.1\r\n\r\n");
         assert_eq!(request.method(), Method::Get);
-        assert_eq!(request.target(), Target::Root);
+        assert_eq!(request.target(), RequestTarget::Root);
     }
 
     #[test]
     fn complete_root_head() {
         let request = complete(b"HEAD / HTTP/1.1\r\n\r\n");
         assert_eq!(request.method(), Method::Head);
-        assert_eq!(request.target(), Target::Root);
+        assert_eq!(request.target(), RequestTarget::Root);
     }
 
     #[test]
@@ -652,27 +652,27 @@ mod tests {
     fn query_target_is_other() {
         assert_eq!(
             complete(b"GET /?x HTTP/1.1\r\n\r\n").target(),
-            Target::Other
+            RequestTarget::Other
         );
     }
 
     #[test]
     fn absolute_form_target_is_other() {
         let request = complete(b"GET http://example.com/ HTTP/1.1\r\n\r\n");
-        assert_eq!(request.target(), Target::Other);
+        assert_eq!(request.target(), RequestTarget::Other);
     }
 
     #[test]
     fn traversal_target_is_other() {
         let request = complete(b"GET /../etc/passwd HTTP/1.1\r\n\r\n");
-        assert_eq!(request.target(), Target::Other);
+        assert_eq!(request.target(), RequestTarget::Other);
     }
 
     #[test]
     fn header_lines_after_request_line_are_ignored() {
         let request = complete(b"GET / HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\n\r\n");
         assert_eq!(request.method(), Method::Get);
-        assert_eq!(request.target(), Target::Root);
+        assert_eq!(request.target(), RequestTarget::Root);
     }
 
     #[test]

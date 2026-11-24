@@ -308,7 +308,7 @@ impl Default for Slots {
 #[cfg(test)]
 mod tests {
     use super::{ConnectionPhase, ReplyChoice, Slots, WriteProgress};
-    use crate::http::{MalformedKind, Method, ParseOutcome, Target};
+    use crate::http::{MalformedKind, Method, ParseOutcome, RequestTarget};
     use crate::serve::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS};
     use mio::net::TcpStream;
     use std::io::Read as _;
@@ -476,7 +476,7 @@ mod tests {
             panic!("expected a complete request, got {outcome:?}");
         };
         assert_eq!(request.method(), Method::Get);
-        assert_eq!(request.target(), Target::Root);
+        assert_eq!(request.target(), RequestTarget::Root);
         let (malformed_stream, _malformed_peer) = fixture.stream();
         let malformed = slots.acquire(malformed_stream, now).unwrap();
         assert_eq!(
