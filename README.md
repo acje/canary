@@ -1,8 +1,9 @@
 # Canary
 
-A single-endpoint liveness probe. One HTTP listener answers exactly
-`Canary <version> is alive!\r\n` (25 bytes at `0.50.0`) on `/` and nothing else,
-so a supervisor can tell a live process from a loaded one with one request.
+A single-endpoint liveness probe. One HTTP listener serves
+`Canary <version> is alive!\r\n` (25 bytes at `0.50.0`) as the body of `GET /`,
+and answers every other request with a fixed reply, so a supervisor can tell a
+live process from a loaded one with one request.
 
 AloxStyle: no async runtime, one owned reactor, bounded work per turn, a fixed
 connection table, and a bounded log queue. The normal dependency graph holds
