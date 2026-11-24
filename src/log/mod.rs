@@ -210,7 +210,7 @@ pub struct Counters {
 }
 
 impl Counters {
-    fn render(self, kind: &'static str, slot: &mut Slot) -> fmt::Result {
+    fn render(self, level: &'static str, kind: &'static str, slot: &mut Slot) -> fmt::Result {
         let Self {
             served,
             rejected,
@@ -218,7 +218,7 @@ impl Counters {
         } = self;
         write!(
             slot,
-            "level=info kind={kind} served={served} rejected={rejected} dropped={dropped}\r\n"
+            "level={level} kind={kind} served={served} rejected={rejected} dropped={dropped}\r\n"
         )
     }
 }
@@ -260,8 +260,8 @@ impl Record {
         let level = self.level().name();
         match self {
             Self::Startup { bind } => write!(slot, "level={level} kind=startup bind={bind}\r\n"),
-            Self::Tick(counters) => counters.render("tick", slot),
-            Self::Shutdown(counters) => counters.render("shutdown", slot),
+            Self::Tick(counters) => counters.render(level, "tick", slot),
+            Self::Shutdown(counters) => counters.render(level, "shutdown", slot),
             Self::FilterUnrecognised => write!(slot, "level={level} kind=filter_default\r\n"),
             Self::SinkFailure { failures } => {
                 write!(
@@ -574,6 +574,23 @@ mod tests {
             store.unwritten_front().unwrap(),
             b"level=info kind=shutdown served=4 rejected=5 dropped=6\r\n"
         );
+    }
+
+    #[test]
+    fn tick_and_shutdown_render_the_same_counter_tail() {
+        let counters = Counters {
+            served: 1,
+            rejected: 2,
+            dropped: 3,
+        };
+        let mut tick = Slot::new();
+        let mut shutdown = Slot::new();
+        Record::Tick(counters).render(&mut tick).unwrap();
+        Record::Shutdown(counters).render(&mut shutdown).unwrap();
+        let tick = String::from_utf8(tick.as_bytes().to_vec()).unwrap();
+        let shutdown = String::from_utf8(shutdown.as_bytes().to_vec()).unwrap();
+        assert_ne!(tick, shutdown);
+        assert_eq!(tick.replace("kind=tick", "kind=shutdown"), shutdown);
     }
 
     #[test]
