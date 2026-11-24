@@ -1071,7 +1071,7 @@ fn reply_bytes(plan: &ResponsePlan, pending: ReplyChoice) -> &[u8] {
     match pending {
         ReplyChoice::Matched(request) => match plan.reply(request) {
             Reply::Full(bytes) => bytes,
-            Reply::HeadOnly(head) => head.head(),
+            Reply::HeadOnly(head) => head.bytes(),
         },
         ReplyChoice::BadRequest => plan.bad_request(),
         ReplyChoice::TooLarge => plan.too_large(),
@@ -1312,7 +1312,7 @@ mod tests {
         let mut harness = Harness::new();
         let received = harness.exchange(b"HEAD / HTTP/1.1\r\n\r\n");
         assert!(received.starts_with(b"HTTP/1.1 200 OK\r\n"));
-        assert_eq!(received, plan().ok_head().head());
+        assert_eq!(received, plan().ok_head().bytes());
         assert_eq!(body_of(&received), []);
         assert_eq!(harness.reactor.served(), 1);
     }

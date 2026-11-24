@@ -274,17 +274,17 @@ const fn classify_target(token: &[u8]) -> RequestTarget {
     }
 }
 
-/// A `HEAD` reply: the header block alone.
+/// The header block of a reply, without its body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Head<'a> {
-    head: &'a [u8],
+pub struct HeaderBlock<'a> {
+    bytes: &'a [u8],
 }
 
-impl<'a> Head<'a> {
-    /// The header block, ending with the empty line.
+impl<'a> HeaderBlock<'a> {
+    /// The header block bytes, ending with the empty line.
     #[must_use]
-    pub fn head(self) -> &'a [u8] {
-        self.head
+    pub fn bytes(self) -> &'a [u8] {
+        self.bytes
     }
 }
 
@@ -294,7 +294,7 @@ pub enum Reply<'a> {
     /// A header block and its body in one slice.
     Full(&'a [u8]),
     /// A header block only, for a `HEAD` request.
-    HeadOnly(Head<'a>),
+    HeadOnly(HeaderBlock<'a>),
 }
 
 /// The five reply buffers, rendered once from the build version.
@@ -346,7 +346,7 @@ impl ResponsePlan {
     /// The `200` header block for `HEAD /`, declaring the body length the
     /// matching `GET` would have sent.
     #[must_use]
-    pub fn ok_head(&self) -> Head<'_> {
+    pub fn ok_head(&self) -> HeaderBlock<'_> {
         self.ok.head()
     }
 
@@ -399,9 +399,9 @@ impl Wire {
         &self.bytes[..self.len]
     }
 
-    fn head(&self) -> Head<'_> {
-        Head {
-            head: &self.bytes[..self.head_len],
+    fn head(&self) -> HeaderBlock<'_> {
+        HeaderBlock {
+            bytes: &self.bytes[..self.head_len],
         }
     }
 }
@@ -589,7 +589,7 @@ mod tests {
     fn reply_bytes(reply: Reply<'_>) -> &[u8] {
         match reply {
             Reply::Full(bytes) => bytes,
-            Reply::HeadOnly(head) => head.head(),
+            Reply::HeadOnly(head) => head.bytes(),
         }
     }
 
@@ -798,8 +798,8 @@ mod tests {
     fn ok_head_carries_the_head_only() {
         let plan = plan();
         let head = plan.ok_head();
-        assert_eq!(head.head(), OK_HEAD);
-        assert_eq!(declared_body_len(head.head()), 25);
+        assert_eq!(head.bytes(), OK_HEAD);
+        assert_eq!(declared_body_len(head.bytes()), 25);
     }
 
     #[test]
@@ -838,7 +838,7 @@ mod tests {
         ] {
             assert_eq!(declared_body_len(reply), body_of(reply).len());
         }
-        assert_eq!(declared_body_len(plan.ok_head().head()), 25);
+        assert_eq!(declared_body_len(plan.ok_head().bytes()), 25);
     }
 
     #[test]
@@ -878,8 +878,8 @@ mod tests {
         let Reply::HeadOnly(head) = reply else {
             panic!("expected a head-only reply, got {reply:?}");
         };
-        assert_eq!(head.head(), &NOT_FOUND_REPLY[..head_len]);
-        assert_eq!(declared_body_len(head.head()), 11);
+        assert_eq!(head.bytes(), &NOT_FOUND_REPLY[..head_len]);
+        assert_eq!(declared_body_len(head.bytes()), 11);
     }
 
     #[test]
