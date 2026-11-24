@@ -8,7 +8,7 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitCode {
     /// Clean shutdown.
-    Ok,
+    Success,
     /// External configuration was rejected.
     Config,
     /// An internal invariant or runtime step failed.
@@ -20,7 +20,7 @@ impl ExitCode {
     #[must_use]
     pub const fn code(self) -> i32 {
         match self {
-            Self::Ok => 0,
+            Self::Success => 0,
             Self::Config => 78,
             Self::Software => 70,
         }
@@ -32,8 +32,8 @@ mod tests {
     use super::ExitCode;
 
     #[test]
-    fn ok_is_zero() {
-        assert_eq!(ExitCode::Ok.code(), 0);
+    fn success_is_zero() {
+        assert_eq!(ExitCode::Success.code(), 0);
     }
 
     #[test]

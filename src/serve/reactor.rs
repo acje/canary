@@ -634,7 +634,7 @@ impl Reactor {
     /// failure latch does not suppress it — the last attempt is the one worth
     /// making, and the deadline bounds it.
     ///
-    /// The caller exits [`ExitCode::Ok`](crate::exit::ExitCode::Ok) once this
+    /// The caller exits [`ExitCode::Success`](crate::exit::ExitCode::Success) once this
     /// returns, whatever the outcome: a shutdown the process was asked for is a
     /// successful stop. Records the deadline or a failing sink left queued are
     /// abandoned with the process. This final drain queues no

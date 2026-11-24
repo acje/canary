@@ -154,7 +154,7 @@ fn run() -> ExitCode {
             store.len()
         );
     }
-    ExitCode::Ok
+    ExitCode::Success
 }
 
 /// Whether the final flush lost a record rather than merely filtered one.
