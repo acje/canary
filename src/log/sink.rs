@@ -54,8 +54,10 @@ pub const LOG_RETRY: Duration = Duration::from_secs(1);
 /// the deadline of its last [`drain_until`] call. Scope: the last drain of the
 /// process. Units: wall-clock time. Limit: 250 ms, which is enough for a reader
 /// that is still consuming and short enough that shutdown stays responsive.
-/// Exhaustion: the drain stops and whatever is still queued is reported through
-/// the drop counter.
+/// Exhaustion: the drain stops at the deadline and whatever is still queued is
+/// abandoned with the process; [`LogStore::dropped`] counts queue refusals only,
+/// so a leftover record never advances it. The returned [`DrainOutcome`] reports
+/// the short flush.
 pub const SHUTDOWN_DRAIN: Duration = Duration::from_millis(250);
 
 /// The result of one [`drain`] turn.

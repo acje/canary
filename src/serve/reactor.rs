@@ -248,6 +248,21 @@ pub enum TurnOutcome {
     ShuttingDown,
 }
 
+/// What the final shutdown flush did.
+///
+/// Returned by [`Reactor::shutdown`] so its caller can report a final line the
+/// queue refused to hold and a flush that the deadline or a failing sink cut
+/// short.
+#[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShutdownReport {
+    /// The outcome of queueing the final [`Record::Shutdown`]; a filtered or
+    /// dropped record never reached the queue.
+    pub record: WriteOutcome,
+    /// The outcome of the bounded final drain.
+    pub drain: DrainOutcome,
+}
+
 /// A poller or socket operation the reactor could not complete.
 ///
 /// Every variant maps to [`ExitCode::Software`] through
@@ -606,23 +621,27 @@ impl Reactor {
     ///
     /// The caller exits [`ExitCode::Ok`] once this returns, whatever the outcome:
     /// a shutdown the process was asked for is a successful stop. Records the
-    /// deadline or a failing sink left queued are abandoned with the process —
-    /// the sink failure is already reported by its own record, and the returned
-    /// [`DrainOutcome`] names why the flush ended short.
+    /// deadline or a failing sink left queued are abandoned with the process.
+    /// This final drain queues no [`Record::SinkFailure`] of its own: a failure
+    /// an earlier turn latched was reported by its own record, while a failure
+    /// first observed here is visible only through the returned
+    /// [`ShutdownReport`], whose fields name whether the last line was queued and
+    /// why the flush ended short.
     pub fn shutdown(
         &mut self,
         store: &mut LogStore,
         filter: LogFilter,
         sink: &mut impl Write,
         now: Instant,
-    ) -> DrainOutcome {
+    ) -> ShutdownReport {
         let record = Record::Shutdown {
             served: self.served,
             rejected: self.rejected,
             dropped: store.dropped(),
         };
-        let _ = store.write(filter, record);
-        sink::drain_until(store, sink, DrainBudget::DEFAULT, now + SHUTDOWN_DRAIN)
+        let record = store.write(filter, record);
+        let drain = sink::drain_until(store, sink, DrainBudget::DEFAULT, now + SHUTDOWN_DRAIN);
+        ShutdownReport { record, drain }
     }
 
     /// Drains whatever the shutdown pipe holds and latches the request.
@@ -1033,7 +1052,7 @@ mod tests {
     use crate::exit::ExitCode;
     use crate::http::ResponsePlan;
     use crate::log::sink::{self, DrainOutcome, LOG_RETRY};
-    use crate::log::{LogFilter, LogStore, Record, WriteOutcome};
+    use crate::log::{LogFilter, LogStore, QUEUE_SLOTS, Record, WriteOutcome};
     use crate::serve::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS};
     use mio::Token;
     use mio::net::TcpListener as MioListener;
@@ -1599,18 +1618,44 @@ mod tests {
             WriteOutcome::Written
         );
         harness.now = Instant::now();
-        let outcome = harness.reactor.shutdown(
+        let report = harness.reactor.shutdown(
             &mut harness.store,
             LogFilter::Info,
             &mut harness.sink,
             harness.now,
         );
-        assert_eq!(outcome, DrainOutcome::Idle);
+        assert_eq!(report.record, WriteOutcome::Written);
+        assert_eq!(report.drain, DrainOutcome::Idle);
         assert!(harness.store.is_empty());
         assert_eq!(
             harness.sink.as_slice(),
             b"level=warn kind=filter_default\r\nlevel=info kind=shutdown served=3 rejected=2 dropped=0\r\n"
         );
+    }
+
+    #[test]
+    fn shutdown_reports_a_final_record_the_queue_refused() {
+        let mut harness = Harness::new();
+        for served in 0..u64::try_from(QUEUE_SLOTS).unwrap() {
+            let record = Record::Tick {
+                served,
+                rejected: 0,
+                dropped: 0,
+            };
+            assert_eq!(
+                harness.store.write(LogFilter::Info, record),
+                WriteOutcome::Written
+            );
+        }
+        harness.now = Instant::now();
+        let report = harness.reactor.shutdown(
+            &mut harness.store,
+            LogFilter::Info,
+            &mut harness.sink,
+            harness.now,
+        );
+        assert_eq!(report.record, WriteOutcome::Dropped);
+        assert_eq!(harness.store.dropped(), 1);
     }
 
     #[test]
@@ -1739,19 +1784,28 @@ mod tests {
         assert_eq!(harness.reactor.next_deadline(harness.now), None);
         assert_eq!(
             recovered.as_slice(),
-            b"level=warn kind=filter_default\r\nlevel=warn kind=sink_failure failures=1\r\n"
+            b"level=warn kind=filter_default\r\nlevel=error kind=sink_failure failures=1\r\n"
         );
     }
 
     #[test]
     fn a_starved_harness_fails_in_bounded_time_with_its_state() {
         let mut harness = Harness::new();
+        let allowance = harness.drive_allowance();
+        assert!(
+            allowance >= DRIVE_SLACK_TURNS,
+            "the starvation predicate must expect real work, but its allowance is {allowance}"
+        );
         let started = Instant::now();
         let caught = panic::catch_unwind(AssertUnwindSafe(|| {
             harness.drive_until(|harness| harness.reactor.served() == u64::MAX);
         }));
         let message = panic_text(caught.expect_err("the starved drive must give up").as_ref());
         assert!(started.elapsed() < DRIVE_DEADLINE);
+        assert!(
+            message.contains(&format!("in {allowance} turns")),
+            "diagnostics {message:?} do not report the {allowance}-turn exhaustion"
+        );
         for field in [
             "served=0",
             "rejected=0",

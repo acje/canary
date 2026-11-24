@@ -13,16 +13,18 @@
 //! - `level=info kind=tick served=<count> rejected=<count> dropped=<count>`.
 //! - `level=info kind=shutdown served=<count> rejected=<count> dropped=<count>`.
 //! - `level=warn kind=filter_default` with no fields.
-//! - `level=warn kind=sink_failure failures=<count>`.
+//! - `level=error kind=sink_failure failures=<count>`.
 //!
 //! Values are never free-form: an address is `SocketAddr`'s `Display` form and a
 //! counter is unsigned decimal, so a value cannot contain a space, `=`, or a
 //! line break. The grammar therefore needs no escaping.
 //!
 //! [`LogFilter::allows`] is the only filter decision. Startup, tick, and
-//! shutdown records are [`Level::Info`]; the filter-defaulted and sink-failure
-//! notices are [`Level::Warn`]. Records leave the queue through [`sink::drain`],
-//! which never blocks and never allocates.
+//! shutdown records are [`Level::Info`]; the filter-defaulted notice is
+//! [`Level::Warn`]; the sink-failure notice is [`Level::Error`], so an operator
+//! who sets `RUST_LOG=error` still learns that external diagnostics are lost.
+//! Records leave the queue through [`sink::drain`], which never blocks and never
+//! allocates.
 
 pub mod sink;
 
@@ -64,7 +66,7 @@ const COUNTER_PREFIX_BYTES: usize =
 const FILTER_DEFAULT_BYTES: usize = "level=warn kind=filter_default\r\n".len();
 
 const SINK_FAILURE_PREFIX_BYTES: usize =
-    "level=warn kind=sink_failure failures=".len() + "\r\n".len();
+    "level=error kind=sink_failure failures=".len() + "\r\n".len();
 
 /// The largest startup line: the prefix plus a maximal address.
 const MAX_STARTUP_BYTES: usize = STARTUP_PREFIX_BYTES + MAX_SOCKET_ADDR_TEXT;
@@ -90,11 +92,10 @@ pub enum Level {
     Warn,
     /// Failures that always survive the filter except [`LogFilter::Off`].
     ///
-    /// The variant is the closed ceiling of [`LogFilter`] and carries no record:
-    /// every degradation this service can observe while it serves — a lost
-    /// queue slot, a refused or failed sink — is recoverable, so it is reported
-    /// at [`Level::Warn`]. A record reaches this level only when an outcome ends
-    /// serving, which is a process exit rather than a log line.
+    /// [`Record::SinkFailure`] carries this level: a drain the sink refused
+    /// loses external diagnostics, and an operator who sets `RUST_LOG=error`
+    /// must still see that loss. The variant is the closed ceiling of
+    /// [`LogFilter`], and every level below it remains reachable from a record.
     Error,
 }
 
@@ -231,7 +232,8 @@ impl Record {
     pub const fn level(self) -> Level {
         match self {
             Self::Startup { .. } | Self::Tick { .. } | Self::Shutdown { .. } => Level::Info,
-            Self::FilterDefaulted | Self::SinkFailure { .. } => Level::Warn,
+            Self::FilterDefaulted => Level::Warn,
+            Self::SinkFailure { .. } => Level::Error,
         }
     }
 
@@ -591,7 +593,7 @@ mod tests {
         );
         assert_eq!(
             store.unwritten_front().unwrap(),
-            b"level=warn kind=sink_failure failures=7\r\n"
+            b"level=error kind=sink_failure failures=7\r\n"
         );
     }
 
@@ -603,7 +605,7 @@ mod tests {
         let front = store.unwritten_front().unwrap();
         assert_eq!(
             front,
-            b"level=warn kind=sink_failure failures=18446744073709551615\r\n"
+            b"level=error kind=sink_failure failures=18446744073709551615\r\n"
         );
         assert_eq!(front.len(), MAX_SINK_FAILURE_BYTES);
     }
@@ -635,9 +637,9 @@ mod tests {
     }
 
     #[test]
-    fn record_levels_are_info_except_the_warn_notices() {
+    fn record_levels_are_info_warn_or_error() {
         assert_eq!(Record::FilterDefaulted.level(), Level::Warn);
-        assert_eq!(Record::SinkFailure { failures: 1 }.level(), Level::Warn);
+        assert_eq!(Record::SinkFailure { failures: 1 }.level(), Level::Error);
         assert_eq!(
             Record::Startup {
                 bind: address("0.0.0.0:1")
@@ -677,6 +679,43 @@ mod tests {
             let actual = [Level::Info, Level::Warn, Level::Error].map(|level| filter.allows(level));
             assert_eq!(actual, expected, "filter {filter:?}");
         }
+    }
+
+    #[test]
+    fn error_filter_admits_only_the_sink_failure_record() {
+        let mut store = store();
+        let lower_levels = [
+            Record::Startup {
+                bind: address("0.0.0.0:8080"),
+            },
+            Record::Tick {
+                served: 0,
+                rejected: 0,
+                dropped: 0,
+            },
+            Record::Shutdown {
+                served: 0,
+                rejected: 0,
+                dropped: 0,
+            },
+            Record::FilterDefaulted,
+        ];
+        for record in lower_levels {
+            assert_eq!(
+                store.write(LogFilter::Error, record),
+                WriteOutcome::Filtered,
+                "record {record:?}"
+            );
+        }
+        assert!(store.is_empty());
+        assert_eq!(
+            store.write(LogFilter::Error, Record::SinkFailure { failures: 1 }),
+            WriteOutcome::Written
+        );
+        assert_eq!(
+            store.unwritten_front().unwrap(),
+            b"level=error kind=sink_failure failures=1\r\n"
+        );
     }
 
     #[test]
