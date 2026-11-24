@@ -10,8 +10,8 @@
 
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -291,42 +291,70 @@ impl Canary {
     /// The claimed port is released before the child spawns, so the connection
     /// may reach a concurrent process's listener instead; a caller that signals
     /// the child afterwards retries that lost claim.
-    fn start_silently(env: &[(&str, &OsStr)]) -> Self {
+    fn start_silently(env: &[(&str, &OsStr)]) -> Option<Self> {
         let port = claim_port();
         let port_text = port.to_string();
         let mut full_env = Vec::from(env);
         full_env.push(("PORT", OsStr::new(&port_text)));
         let mut canary = Self::spawn(&full_env);
         canary.port = Some(port);
-        canary.await_accept();
-        canary
+        canary.await_accept().then_some(canary)
+    }
+
+    /// The loopback address the readiness poll dials.
+    fn probe_address(&self) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], self.port()))
     }
 
     /// Polls the claimed port until the reactor accepts a connection.
     ///
-    /// A refused connection is retried within [`DEADLINE`] because the child
-    /// may not have bound yet. A failure reports the exit status, its signal,
-    /// and both captured streams, so a death before the listener existed is
-    /// diagnosable rather than a bare mismatch.
-    fn await_accept(&mut self) {
+    /// Each attempt carries the time left before [`DEADLINE`], so a foreign
+    /// listener with a full accept queue cannot block the poll past the
+    /// deadline. Returns `false` when the child exits without a listener of its
+    /// own, which [`lost_its_claim`] attributes to the released claim and the
+    /// caller retries. A child that stays alive without accepting is a genuine
+    /// readiness failure and panics with the exit status, its signal, and both
+    /// captured streams.
+    fn await_accept(&mut self) -> bool {
         let deadline = Instant::now() + DEADLINE;
+        let mut last_error = None;
         loop {
-            match TcpStream::connect(("127.0.0.1", self.port())) {
-                Ok(_) => return,
-                Err(error) if Instant::now() >= deadline => {
-                    let status = self.child.try_wait().expect("the child status is readable");
-                    let signal = status.as_ref().and_then(ExitStatus::signal);
-                    let stdout: Vec<String> = self.stdout.try_iter().collect();
-                    let stderr: Vec<String> = self.stderr.try_iter().collect();
-                    panic!(
-                        "the reactor accepted no connection before {DEADLINE:?}: \
-                         last_error={error} exited={status:?} signal={signal:?} \
-                         stdout={stdout:?} stderr={stderr:?}"
-                    );
+            let left = remaining(deadline);
+            if !left.is_zero() {
+                match TcpStream::connect_timeout(&self.probe_address(), left) {
+                    Ok(_) => return true,
+                    Err(error) => last_error = Some(error),
                 }
-                Err(_) => thread::sleep(Duration::from_millis(5)),
             }
+            let status = self.child.try_wait().expect("the child status is readable");
+            if let Some(status) = status {
+                if lost_its_claim(status) {
+                    return false;
+                }
+                panic!(
+                    "{}",
+                    self.readiness_failure(Some(status), last_error.as_ref())
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{}",
+                self.readiness_failure(None, last_error.as_ref())
+            );
+            thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// The readiness diagnostic for a child that did not accept a connection.
+    fn readiness_failure(&self, status: Option<ExitStatus>, last_error: Option<&Error>) -> String {
+        let signal = status.as_ref().and_then(ExitStatus::signal);
+        let stdout: Vec<String> = self.stdout.try_iter().collect();
+        let stderr: Vec<String> = self.stderr.try_iter().collect();
+        format!(
+            "the reactor accepted no connection before {DEADLINE:?}: \
+             last_error={last_error:?} exited={status:?} signal={signal:?} \
+             stdout={stdout:?} stderr={stderr:?}"
+        )
     }
 
     /// The port the startup line named.
@@ -403,17 +431,21 @@ fn run_args_to_exit(env: &[(&str, &OsStr)], args: &[&str]) -> Finished {
 }
 
 /// Starts the binary silently, requests shutdown, and collects what it printed.
-fn silence_until_shutdown(filter: &str) -> Finished {
+///
+/// `None` means the silent start lost its claimed port before the reactor was
+/// ready, which the caller retries; the shutdown request is only sent to a
+/// child that accepted the readiness connection.
+fn silence_until_shutdown(filter: &str) -> Option<Finished> {
     let env = [("RUST_LOG", OsStr::new(filter))];
-    let mut canary = Canary::start_silently(&env);
+    let mut canary = Canary::start_silently(&env)?;
     canary.signal("TERM");
     let status = canary.wait(Instant::now() + EXIT_DEADLINE);
     let deadline = Instant::now() + DEADLINE;
-    Finished {
+    Some(Finished {
         status,
         stdout: canary.stdout_until_closed(deadline),
         stderr: canary.stderr_until_closed(deadline),
-    }
+    })
 }
 
 /// Whether a silent start lost its claimed port to another process.
@@ -423,7 +455,8 @@ fn silence_until_shutdown(filter: &str) -> Finished {
 /// without a listener of its own, or — when the foreign listener answered the
 /// readiness connection — is killed by the shutdown signal before its handlers
 /// exist, which the operating system reports as a signal rather than a status.
-/// Both are retried; every other outcome belongs to the filter under test.
+/// A start that never reaches readiness has no outcome at all; the caller
+/// retries that too. Every other outcome belongs to the filter under test.
 fn lost_its_claim(status: ExitStatus) -> bool {
     matches!(status.code(), None | Some(78))
 }
@@ -576,8 +609,14 @@ fn a_health_check_against_a_live_listener_succeeds_without_booting() {
 
 #[test]
 fn a_health_check_against_a_closed_port_fails_with_one_line() {
-    let port = claim_port().to_string();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("the test holds a loopback port");
+    let port = listener
+        .local_addr()
+        .expect("the held port is readable")
+        .port()
+        .to_string();
     let finished = run_args_to_exit(&[("PORT", OsStr::new(&port))], &["--health-check"]);
+    drop(listener);
     assert_eq!(finished.status.code(), Some(1), "{:?}", finished.stderr);
     assert!(finished.stdout.is_empty(), "{:?}", finished.stdout);
     assert_eq!(finished.stderr.len(), 1, "{:?}", finished.stderr);
@@ -672,7 +711,10 @@ fn a_silencing_filter_prints_nothing_and_still_exits_cleanly() {
     for filter in ["off", "warn"] {
         let mut outcome = silence_until_shutdown(filter);
         for _ in 1..SILENT_ATTEMPTS {
-            if !lost_its_claim(outcome.status) {
+            let retry = outcome
+                .as_ref()
+                .is_none_or(|finished| lost_its_claim(finished.status));
+            if !retry {
                 break;
             }
             outcome = silence_until_shutdown(filter);
@@ -681,7 +723,7 @@ fn a_silencing_filter_prints_nothing_and_still_exits_cleanly() {
             status,
             stdout,
             stderr,
-        } = outcome;
+        } = outcome.expect("a silent start kept its claimed port within the attempts");
         assert_eq!(status.code(), Some(0), "RUST_LOG={filter}");
         assert!(stdout.is_empty(), "RUST_LOG={filter}: {stdout:?}");
         assert!(stderr.is_empty(), "RUST_LOG={filter}: {stderr:?}");
