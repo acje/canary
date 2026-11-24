@@ -60,7 +60,7 @@ pub(crate) const LOG_RETRY: Duration = Duration::from_secs(1);
 /// consuming and short enough that startup and shutdown stay responsive.
 /// Exhaustion: the drain stops at the deadline and the remainder stays queued;
 /// at startup the serving turns offer it again, and at shutdown it is abandoned
-/// with the process. [`LogQueue::dropped`] counts queue refusals only, so a
+/// with the process. `LogQueue::dropped` counts queue refusals only, so a
 /// leftover record never advances it. The returned [`DrainOutcome`] reports the
 /// short flush. Evidence:
 /// `drain_until_with_an_elapsed_deadline_performs_exactly_one_drain`.

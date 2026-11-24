@@ -358,7 +358,7 @@ impl LogQueue {
     ///
     /// A [`QueueOutcome::Filtered`] result leaves both the queue and the drop
     /// counter untouched. A [`QueueOutcome::Dropped`] result leaves the queue
-    /// untouched and advances [`LogQueue::dropped`] by one.
+    /// untouched and advances `LogQueue::dropped` by one.
     pub fn enqueue(&mut self, filter: LogFilter, record: Record) -> QueueOutcome {
         if !filter.allows(record.level()) {
             return QueueOutcome::Filtered;
