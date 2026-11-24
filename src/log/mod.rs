@@ -828,6 +828,10 @@ mod tests {
             ),
             WriteOutcome::Filtered
         );
+        assert_eq!(
+            store.write(LogFilter::Off, Record::SinkFailure { failures: 1 }),
+            WriteOutcome::Filtered
+        );
         assert_eq!(store.dropped(), 0);
         assert!(store.is_empty());
     }

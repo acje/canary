@@ -310,7 +310,8 @@ impl std::error::Error for ServeError {}
 struct SinkHealth {
     /// The kind of the drain failure the reactor has not yet recovered from.
     failed: Option<ErrorKind>,
-    /// Whether this failure episode has already queued its record.
+    /// Whether this failure episode has already attempted its record; a filtered
+    /// attempt counts as handled.
     recorded: bool,
     /// The failed drains counted since startup.
     failures: u64,
@@ -623,10 +624,10 @@ impl Reactor {
     /// a shutdown the process was asked for is a successful stop. Records the
     /// deadline or a failing sink left queued are abandoned with the process.
     /// This final drain queues no [`Record::SinkFailure`] of its own: a failure
-    /// an earlier turn latched was reported by its own record, while a failure
-    /// first observed here is visible only through the returned
-    /// [`ShutdownReport`], whose fields name whether the last line was queued and
-    /// why the flush ended short.
+    /// an earlier turn latched already carries its own record when the filter and
+    /// the queue allowed one, while a failure first observed here is visible only
+    /// through the returned [`ShutdownReport`], whose fields name whether the last
+    /// line was queued and why the flush ended short.
     pub fn shutdown(
         &mut self,
         store: &mut LogStore,
@@ -932,9 +933,10 @@ impl Reactor {
     ///
     /// A failed drain latches the sink: no drain is offered again before the
     /// retry deadline, so a broken sink costs one attempt per second instead of
-    /// one per turn. The first failure of an episode queues one
-    /// [`Record::SinkFailure`], and a drain the sink takes clears the latch, which
-    /// makes the next failure a new episode.
+    /// one per turn. The first failure of an episode attempts its one
+    /// [`Record::SinkFailure`], and a filtered attempt counts as handled; a drain
+    /// the sink takes clears the latch, which makes the next failure a new
+    /// episode.
     fn drain_logs(
         &mut self,
         store: &mut LogStore,

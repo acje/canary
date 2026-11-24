@@ -2,8 +2,10 @@
 //!
 //! A turn of the reactor calls [`drain`] with a [`DrainBudget`]; the sink never
 //! blocks, never allocates, and never grows. Whatever the operating system
-//! refuses stays queued and is offered again next turn, so a slow reader costs
-//! throughput and never a record that was accepted into the queue.
+//! refuses stays queued and is offered again on a later serving turn, so a slow
+//! reader costs throughput and never a record that was accepted into the queue
+//! while the process keeps serving: only the final [`SHUTDOWN_DRAIN`] flush can
+//! abandon what a reader never drained.
 //!
 //! [`NonblockingStdout`] owns an unbuffered handle to the inherited standard
 //! output descriptor, so [`std::io::Write::write`] returns `Ok(n)` only when n
