@@ -38,7 +38,7 @@ use signal_hook::low_level::pipe as signal_pipe;
 
 use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, ParseOutcome, Reply, ResponsePlan};
 use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DRAIN, LOG_RETRY};
-use crate::log::{LogFilter, LogQueue, QueueOutcome, Record};
+use crate::log::{Counters, LogFilter, LogQueue, QueueOutcome, Record};
 
 use super::slots::{Pending, Phase, Slots, WriteProgress};
 use super::{HEAD_BYTES, MAX_CONNECTIONS};
@@ -650,11 +650,11 @@ impl Reactor {
         sink: &mut impl Write,
         now: Instant,
     ) -> ShutdownReport {
-        let record = Record::Shutdown {
+        let record = Record::Shutdown(Counters {
             served: self.served,
             rejected: self.rejected,
             dropped: store.dropped(),
-        };
+        });
         let record = store.enqueue(filter, record);
         let drain = sink::drain_until(store, sink, DrainBudget::DEFAULT, now + FLUSH_DRAIN);
         ShutdownReport { record, drain }
@@ -702,11 +702,11 @@ impl Reactor {
         {
             return false;
         }
-        let record = Record::Tick {
+        let record = Record::Tick(Counters {
             served: self.served,
             rejected: self.rejected,
             dropped: store.dropped(),
-        };
+        });
         self.tick.last = Some(now);
         match store.enqueue(filter, record) {
             QueueOutcome::Queued => {
@@ -1086,7 +1086,7 @@ mod tests {
     };
     use crate::http::ResponsePlan;
     use crate::log::sink::{self, DrainOutcome, LOG_RETRY};
-    use crate::log::{LogFilter, LogQueue, QUEUE_SLOTS, QueueOutcome, Record};
+    use crate::log::{Counters, LogFilter, LogQueue, QUEUE_SLOTS, QueueOutcome, Record};
     use crate::serve::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS};
     use mio::Token;
     use mio::net::TcpListener as MioListener;
@@ -1529,11 +1529,11 @@ mod tests {
         let mut harness = Harness::new();
         let queued = 32u64;
         for served in 0..queued {
-            let record = Record::Tick {
+            let record = Record::Tick(Counters {
                 served,
                 rejected: 0,
                 dropped: 0,
-            };
+            });
             assert_eq!(
                 harness.store.enqueue(LogFilter::Info, record),
                 QueueOutcome::Queued
@@ -1700,11 +1700,11 @@ mod tests {
     fn shutdown_reports_a_final_record_the_queue_refused() {
         let mut harness = Harness::new();
         for served in 0..u64::try_from(QUEUE_SLOTS).unwrap() {
-            let record = Record::Tick {
+            let record = Record::Tick(Counters {
                 served,
                 rejected: 0,
                 dropped: 0,
-            };
+            });
             assert_eq!(
                 harness.store.enqueue(LogFilter::Info, record),
                 QueueOutcome::Queued

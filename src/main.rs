@@ -190,7 +190,7 @@ fn failed(message: impl fmt::Display, code: ExitCode) -> ExitCode {
 mod tests {
     use super::shutdown_flush_incomplete;
     use canary::log::sink::DrainOutcome;
-    use canary::log::{LogFilter, LogQueue, QueueOutcome, Record};
+    use canary::log::{Counters, LogFilter, LogQueue, QueueOutcome, Record};
     use canary::serve::ShutdownReport;
 
     fn report(record: QueueOutcome) -> ShutdownReport {
@@ -202,11 +202,11 @@ mod tests {
 
     fn store_with_one_record() -> LogQueue {
         let mut store = LogQueue::new().unwrap();
-        let record = Record::Tick {
+        let record = Record::Tick(Counters {
             served: 0,
             rejected: 0,
             dropped: 0,
-        };
+        });
         assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         store
     }

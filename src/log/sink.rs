@@ -268,7 +268,7 @@ mod tests {
         DrainBudget, DrainOutcome, FLUSH_DRAIN, NonblockingStdout, SINK_MAX_BYTES, SINK_MAX_OPS,
         drain, drain_until,
     };
-    use crate::log::{LogFilter, LogQueue, QueueOutcome, Record};
+    use crate::log::{Counters, LogFilter, LogQueue, QueueOutcome, Record};
     use std::collections::VecDeque;
     use std::fs::File;
     use std::io::{self, ErrorKind, Read, Write};
@@ -352,11 +352,11 @@ mod tests {
     fn store_with(records: u64) -> LogQueue {
         let mut store = LogQueue::new().unwrap();
         for served in 0..records {
-            let record = Record::Tick {
+            let record = Record::Tick(Counters {
                 served,
                 rejected: 0,
                 dropped: 0,
-            };
+            });
             assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         }
         store

@@ -198,6 +198,17 @@ impl FilterParse {
     }
 }
 
+/// The counters one sample carries, in the order every counter line renders them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Counters {
+    /// Requests served since startup.
+    pub served: u64,
+    /// Requests rejected since startup.
+    pub rejected: u64,
+    /// Log records dropped since startup.
+    pub dropped: u64,
+}
+
 /// A lifecycle event the reactor records, with no free-form text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Record {
@@ -207,23 +218,9 @@ pub enum Record {
         bind: SocketAddr,
     },
     /// A periodic counter sample.
-    Tick {
-        /// Requests served since startup.
-        served: u64,
-        /// Requests rejected since startup.
-        rejected: u64,
-        /// Log records dropped since startup.
-        dropped: u64,
-    },
+    Tick(Counters),
     /// The final counter sample before shutdown.
-    Shutdown {
-        /// Requests served since startup.
-        served: u64,
-        /// Requests rejected since startup.
-        rejected: u64,
-        /// Log records dropped since startup.
-        dropped: u64,
-    },
+    Shutdown(Counters),
     /// `RUST_LOG` supplied a value that named no severity, so the filter fell
     /// back to info.
     FilterUnrecognised,
@@ -239,7 +236,7 @@ impl Record {
     #[must_use]
     pub const fn level(self) -> Level {
         match self {
-            Self::Startup { .. } | Self::Tick { .. } | Self::Shutdown { .. } => Level::Info,
+            Self::Startup { .. } | Self::Tick(_) | Self::Shutdown(_) => Level::Info,
             Self::FilterUnrecognised => Level::Warn,
             Self::SinkFailure { .. } => Level::Error,
         }
@@ -249,19 +246,19 @@ impl Record {
         let level = self.level().name();
         match self {
             Self::Startup { bind } => write!(slot, "level={level} kind=startup bind={bind}\r\n"),
-            Self::Tick {
+            Self::Tick(Counters {
                 served,
                 rejected,
                 dropped,
-            } => write!(
+            }) => write!(
                 slot,
                 "level={level} kind=tick served={served} rejected={rejected} dropped={dropped}\r\n"
             ),
-            Self::Shutdown {
+            Self::Shutdown(Counters {
                 served,
                 rejected,
                 dropped,
-            } => write!(
+            }) => write!(
                 slot,
                 "level={level} kind=shutdown served={served} rejected={rejected} dropped={dropped}\r\n"
             ),
@@ -489,8 +486,8 @@ impl fmt::Write for Slot {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConsumeOutcome, Level, LogFilter, LogQueue, LogQueueError, MAX_SINK_FAILURE_BYTES,
-        QUEUE_BYTES, QUEUE_SLOTS, QueueOutcome, Record, SLOT_BYTES, Slot,
+        ConsumeOutcome, Counters, Level, LogFilter, LogQueue, LogQueueError,
+        MAX_SINK_FAILURE_BYTES, QUEUE_BYTES, QUEUE_SLOTS, QueueOutcome, Record, SLOT_BYTES, Slot,
     };
     use std::fmt::Write as _;
     use std::net::SocketAddr;
@@ -552,11 +549,11 @@ mod tests {
     #[test]
     fn tick_record_renders_exact_bytes_in_field_order() {
         let mut store = store();
-        let record = Record::Tick {
+        let record = Record::Tick(Counters {
             served: 1,
             rejected: 2,
             dropped: 3,
-        };
+        });
         assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         assert_eq!(
             store.unwritten_front().unwrap(),
@@ -567,11 +564,11 @@ mod tests {
     #[test]
     fn shutdown_record_renders_exact_bytes_in_field_order() {
         let mut store = store();
-        let record = Record::Shutdown {
+        let record = Record::Shutdown(Counters {
             served: 4,
             rejected: 5,
             dropped: 6,
-        };
+        });
         assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         assert_eq!(
             store.unwritten_front().unwrap(),
@@ -621,11 +618,11 @@ mod tests {
     #[test]
     fn maximal_counters_fit_one_slot() {
         let mut store = store();
-        let record = Record::Tick {
+        let record = Record::Tick(Counters {
             served: u64::MAX,
             rejected: u64::MAX,
             dropped: u64::MAX,
-        };
+        });
         assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         assert_eq!(
             store.unwritten_front().unwrap(),
@@ -656,20 +653,20 @@ mod tests {
             Level::Info
         );
         assert_eq!(
-            Record::Tick {
+            Record::Tick(Counters {
                 served: 0,
                 rejected: 0,
                 dropped: 0
-            }
+            })
             .level(),
             Level::Info
         );
         assert_eq!(
-            Record::Shutdown {
+            Record::Shutdown(Counters {
                 served: 0,
                 rejected: 0,
                 dropped: 0
-            }
+            })
             .level(),
             Level::Info
         );
@@ -696,16 +693,16 @@ mod tests {
             Record::Startup {
                 bind: address("0.0.0.0:8080"),
             },
-            Record::Tick {
+            Record::Tick(Counters {
                 served: 0,
                 rejected: 0,
                 dropped: 0,
-            },
-            Record::Shutdown {
+            }),
+            Record::Shutdown(Counters {
                 served: 0,
                 rejected: 0,
                 dropped: 0,
-            },
+            }),
             Record::FilterUnrecognised,
         ];
         for record in lower_levels {
@@ -802,11 +799,11 @@ mod tests {
     #[test]
     fn warn_filter_suppresses_info_and_keeps_warn() {
         let mut store = store();
-        let tick = Record::Tick {
+        let tick = Record::Tick(Counters {
             served: 0,
             rejected: 0,
             dropped: 0,
-        };
+        });
         assert_eq!(store.enqueue(LogFilter::Warn, tick), QueueOutcome::Filtered);
         assert_eq!(
             store.enqueue(LogFilter::Warn, Record::FilterUnrecognised),
@@ -828,11 +825,11 @@ mod tests {
         assert_eq!(
             store.enqueue(
                 LogFilter::Off,
-                Record::Tick {
+                Record::Tick(Counters {
                     served: 0,
                     rejected: 0,
                     dropped: 0
-                }
+                })
             ),
             QueueOutcome::Filtered
         );
@@ -849,20 +846,20 @@ mod tests {
         let mut store = store();
         let capacity = u64::try_from(QUEUE_SLOTS).unwrap();
         for served in 0..capacity {
-            let record = Record::Tick {
+            let record = Record::Tick(Counters {
                 served,
                 rejected: 0,
                 dropped: 0,
-            };
+            });
             assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         }
         assert_eq!(store.len(), QUEUE_SLOTS);
         let unchanged = front(&store);
-        let rejected = Record::Tick {
+        let rejected = Record::Tick(Counters {
             served: u64::MAX,
             rejected: 0,
             dropped: 0,
-        };
+        });
         assert_eq!(
             store.enqueue(LogFilter::Info, rejected),
             QueueOutcome::Dropped
@@ -885,11 +882,11 @@ mod tests {
         let mut next_read = 0u64;
         for _ in 0..3 {
             for _ in 0..per_round {
-                let record = Record::Tick {
+                let record = Record::Tick(Counters {
                     served: next_written,
                     rejected: 0,
                     dropped: 0,
-                };
+                });
                 assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
                 next_written += 1;
             }
@@ -909,11 +906,11 @@ mod tests {
     #[test]
     fn partial_consume_reveals_the_remainder_then_advances() {
         let mut store = store();
-        let first = Record::Tick {
+        let first = Record::Tick(Counters {
             served: 1,
             rejected: 2,
             dropped: 3,
-        };
+        });
         assert_eq!(store.enqueue(LogFilter::Info, first), QueueOutcome::Queued);
         assert_eq!(
             store.enqueue(LogFilter::Info, Record::FilterUnrecognised),
@@ -954,11 +951,11 @@ mod tests {
     #[test]
     fn consuming_past_the_front_record_changes_nothing() {
         let mut store = store();
-        let record = Record::Tick {
+        let record = Record::Tick(Counters {
             served: 7,
             rejected: 8,
             dropped: 9,
-        };
+        });
         assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         let unchanged = front(&store);
         assert_eq!(
@@ -992,11 +989,11 @@ mod tests {
         let reserved = store.bytes.capacity();
         let slots = u64::try_from(QUEUE_SLOTS).unwrap();
         for served in 0..slots {
-            let record = Record::Tick {
+            let record = Record::Tick(Counters {
                 served,
                 rejected: 0,
                 dropped: 0,
-            };
+            });
             assert_eq!(store.enqueue(LogFilter::Info, record), QueueOutcome::Queued);
         }
         assert_eq!(store.len(), QUEUE_SLOTS);
