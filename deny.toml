@@ -39,8 +39,8 @@ ignore = [
 [bans]
 multiple-versions = "deny"
 skip = [
-    { name = "windows-sys", version = "0.52.0", reason = "Windows-only target crate pinned by the actix baseline lock; coexists with 0.59.0; never compiled on the darwin/linux targets this repo builds; removed with actix in M03" },
-    { name = "windows-sys", version = "0.61.2", reason = "Windows-only target crate pinned by mio 1.2.4 in M05; coexists with 0.52.0 and 0.59.0; never compiled on the darwin/linux targets this repo builds; removed when the direct mio dependency is the only mio" },
+    { name = "windows-sys", version = "0.52.0", reason = "Windows-only target crate required by socket2 0.5.7 and tokio 1.41.0; coexists with 0.59.0 from anstyle-wincon and 0.61.2 from mio; never compiled on the darwin/linux targets this repo builds; removable in M07 when the actix/tokio prune drops socket2 and mio's 0.61.2 is the only windows-sys left" },
+    { name = "windows-sys", version = "0.61.2", reason = "Windows-only target crate required by mio 1.2.4, the only mio and the only holder of 0.61.2; coexists with 0.52.0 from socket2/tokio and 0.59.0 from anstyle-wincon; never compiled on the darwin/linux targets this repo builds; redundant in M07 when the actix/tokio prune leaves this as the only windows-sys and cargo deny reports the skip unmatched" },
 ]
 
 [sources]

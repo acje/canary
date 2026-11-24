@@ -8,7 +8,7 @@
 
 pub mod slots;
 
-pub use slots::{HeadProgress, Pending, Phase, ReadOutcome, Slots, WriteProgress};
+pub use slots::{Pending, Phase, ReadOutcome, Slots, WriteProgress};
 
 use std::time::Duration;
 

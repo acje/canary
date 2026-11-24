@@ -4,8 +4,8 @@
 //! never grows. Each occupied slot owns its stream, its absolute deadline, and a
 //! closed [`Connection`] state. A reading slot buffers at most [`super::HEAD_BYTES`]
 //! of request head and classifies it through [`crate::http::parse_head`]; a
-//! writing slot stores only the reply variant and a cursor, never rendered
-//! bytes; a closing slot accepts no further reads.
+//! writing slot stores only the reply variant, a cursor, and the reply length,
+//! never rendered bytes; a closing slot accepts no further reads.
 
 use mio::net::TcpStream;
 use std::time::Instant;
@@ -42,15 +42,6 @@ pub enum ReadOutcome {
     TooLarge,
 }
 
-/// Whether a reading slot's head buffer still has room.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HeadProgress {
-    /// The head accepted the offered bytes and still has room.
-    Filled,
-    /// The head buffer is full.
-    AtCapacity,
-}
-
 /// The outcome of advancing a writing slot's cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WriteProgress {
@@ -71,15 +62,20 @@ pub enum Phase {
     Closing,
 }
 
-/// The read or write state of one occupied slot.
-///
-/// The reading variant inlines its fixed head buffer, so a slot allocates
-/// nothing after construction. The size gap between variants is the deliberate
-/// cost of that inlining.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the reading variant inlines the fixed head buffer so a slot allocates nothing after construction"
+)]
 enum Connection {
-    Reading { head: [u8; HEAD_BYTES], len: usize },
-    Writing { pending: Pending, cursor: usize },
+    Reading {
+        head: [u8; HEAD_BYTES],
+        len: usize,
+    },
+    Writing {
+        pending: Pending,
+        cursor: usize,
+        reply_len: usize,
+    },
     Closing,
 }
 
@@ -87,7 +83,6 @@ struct Occupant {
     stream: TcpStream,
     expires_at: Instant,
     connection: Connection,
-    reply_len: usize,
 }
 
 struct Slot {
@@ -132,7 +127,6 @@ impl Slots {
                 head: [0; HEAD_BYTES],
                 len: 0,
             },
-            reply_len: 0,
         });
         self.len += 1;
         Some(index)
@@ -176,23 +170,6 @@ impl Slots {
         Some(classify(&head[..*len]))
     }
 
-    /// Whether the head buffer of the reading slot `index` is full.
-    ///
-    /// Returns `None` when `index` is not a reading slot.
-    #[must_use]
-    pub fn head_progress(&self, index: usize) -> Option<HeadProgress> {
-        let Connection::Reading { len, .. } =
-            &self.entries.get(index)?.occupant.as_ref()?.connection
-        else {
-            return None;
-        };
-        Some(if *len == HEAD_BYTES {
-            HeadProgress::AtCapacity
-        } else {
-            HeadProgress::Filled
-        })
-    }
-
     /// Moves the reading slot `index` into a `total_len`-byte write of `pending`.
     ///
     /// `total_len` is the byte length of the plan reply the reactor selected.
@@ -209,8 +186,11 @@ impl Slots {
         if !matches!(occupant.connection, Connection::Reading { .. }) {
             return false;
         }
-        occupant.connection = Connection::Writing { pending, cursor: 0 };
-        occupant.reply_len = total_len;
+        occupant.connection = Connection::Writing {
+            pending,
+            cursor: 0,
+            reply_len: total_len,
+        };
         true
     }
 
@@ -223,13 +203,15 @@ impl Slots {
     #[must_use]
     pub fn advance_written(&mut self, index: usize, written: usize) -> Option<WriteProgress> {
         let occupant = self.entries.get_mut(index)?.occupant.as_mut()?;
-        let reply_len = occupant.reply_len;
-        let Connection::Writing { cursor, .. } = &mut occupant.connection else {
+        let Connection::Writing {
+            cursor, reply_len, ..
+        } = &mut occupant.connection
+        else {
             return None;
         };
         let remaining = reply_len.saturating_sub(*cursor);
         *cursor += written.min(remaining);
-        Some(if *cursor >= reply_len {
+        Some(if *cursor >= *reply_len {
             WriteProgress::Finished
         } else {
             WriteProgress::Remaining
@@ -250,7 +232,9 @@ impl Slots {
         };
         matches!(
             &occupant.connection,
-            Connection::Writing { cursor, .. } if *cursor >= occupant.reply_len
+            Connection::Writing {
+                cursor, reply_len, ..
+            } if cursor >= reply_len
         )
     }
 
@@ -300,6 +284,10 @@ impl Slots {
     /// Scans every slot once and returns the number of indices written. A slot
     /// is expired only when `now` is strictly after its absolute deadline, so an
     /// instant exactly at the deadline is not expired.
+    ///
+    /// The returned indices stay valid only until the next [`Slots::acquire`] or
+    /// [`Slots::release`]: acquire reuses the lowest free slot, so a stale index
+    /// can name a fresh connection. Act on a sweep before mutating the table.
     #[must_use]
     pub fn expired(&self, now: Instant, out: &mut [usize; MAX_CONNECTIONS]) -> usize {
         let mut count = 0;
@@ -356,7 +344,7 @@ fn classify(head: &[u8]) -> ReadOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{HeadProgress, Pending, Phase, ReadOutcome, Slots, WriteProgress};
+    use super::{Pending, Phase, ReadOutcome, Slots, WriteProgress};
     use crate::http::{MalformedKind, Method, Target};
     use crate::serve::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS};
     use mio::net::TcpStream;
@@ -449,6 +437,7 @@ mod tests {
         let mut slots = Slots::new();
         let now = Instant::now();
         let (stream, mut peer) = fixture.stream();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         let index = slots.acquire(stream, now).unwrap();
         slots.release(index);
         let mut buffer = [0u8; 1];
@@ -469,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn read_into_reports_incomplete_then_capacity() {
+    fn read_into_reports_incomplete_then_too_large() {
         let fixture = Fixture::new();
         let mut slots = Slots::new();
         let now = Instant::now();
@@ -479,12 +468,10 @@ mod tests {
             slots.read_into(index, b"GET / HTT"),
             Some(ReadOutcome::Incomplete)
         );
-        assert_eq!(slots.head_progress(index), Some(HeadProgress::Filled));
         assert_eq!(
             slots.read_into(index, &[b'a'; HEAD_BYTES]),
             Some(ReadOutcome::TooLarge)
         );
-        assert_eq!(slots.head_progress(index), Some(HeadProgress::AtCapacity));
     }
 
     #[test]
@@ -500,10 +487,6 @@ mod tests {
             slots.read_into(at_cap_index, &head),
             Some(ReadOutcome::Complete(_))
         ));
-        assert_eq!(
-            slots.head_progress(at_cap_index),
-            Some(HeadProgress::AtCapacity)
-        );
         let (over, _over_peer) = fixture.stream();
         let over_index = slots.acquire(over, now).unwrap();
         let head = padded_head(HEAD_BYTES + 1);
@@ -511,9 +494,11 @@ mod tests {
             slots.read_into(over_index, &head),
             Some(ReadOutcome::TooLarge)
         );
+        let (unterminated, _unterminated_peer) = fixture.stream();
+        let unterminated_index = slots.acquire(unterminated, now).unwrap();
         assert_eq!(
-            slots.head_progress(over_index),
-            Some(HeadProgress::AtCapacity)
+            slots.read_into(unterminated_index, &[b'a'; HEAD_BYTES + 1]),
+            Some(ReadOutcome::TooLarge)
         );
     }
 
@@ -557,6 +542,32 @@ mod tests {
             1
         );
         assert_eq!(out[0], index);
+    }
+
+    #[test]
+    fn released_expired_index_carries_a_fresh_deadline_when_reacquired() {
+        let fixture = Fixture::new();
+        let mut slots = Slots::new();
+        let accepted = Instant::now();
+        let (stream, _peer) = fixture.stream();
+        let index = slots.acquire(stream, accepted).unwrap();
+        let late = accepted + CONNECTION_DEADLINE + Duration::from_nanos(1);
+        let mut out = [0usize; MAX_CONNECTIONS];
+        assert_eq!(slots.expired(late, &mut out), 1);
+        assert_eq!(out[0], index);
+        slots.release(out[0]);
+        let (replacement, _replacement_peer) = fixture.stream();
+        assert_eq!(slots.acquire(replacement, late), Some(index));
+        let mut fresh = [0usize; MAX_CONNECTIONS];
+        assert_eq!(slots.expired(late, &mut fresh), 0);
+        assert_eq!(
+            slots.expired(
+                late + CONNECTION_DEADLINE + Duration::from_nanos(1),
+                &mut fresh
+            ),
+            1
+        );
+        assert_eq!(fresh[0], index);
     }
 
     #[test]
@@ -606,7 +617,6 @@ mod tests {
     fn vacant_slot_rejects_every_operation() {
         let mut slots = Slots::new();
         assert_eq!(slots.read_into(0, b"GET / HTTP/1.1\r\n\r\n"), None);
-        assert_eq!(slots.head_progress(0), None);
         assert_eq!(slots.advance_written(0, 1), None);
         assert_eq!(slots.pending(0), None);
         assert_eq!(slots.phase(0), None);
