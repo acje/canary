@@ -652,8 +652,8 @@ fn an_unknown_invocation_is_rejected_with_the_config_status() {
     }
 }
 
-#[test]
 /// Guards [`is_exact_pin`], the predicate the manifest pin test relies on.
+#[test]
 fn an_exact_pin_names_three_numeric_components() {
     assert!(is_exact_pin("=0.2.191"));
     assert!(is_exact_pin("=1.2.3"));
@@ -791,12 +791,19 @@ fn the_manifest_pins_every_dependency_exactly() {
         String::from_utf8_lossy(&metadata.stderr)
     );
     let output = String::from_utf8(metadata.stdout).expect("cargo metadata prints UTF-8");
+    assert!(
+        output.contains("\"dependencies\":["),
+        "cargo metadata printed no dependencies array: {output}"
+    );
     let requirements: Vec<&str> = output
         .split("\"req\":\"")
         .skip(1)
         .map(|tail| tail.split('"').next().expect("the requirement is quoted"))
         .collect();
-    assert!(!requirements.is_empty(), "{output}");
+    assert!(
+        !requirements.is_empty(),
+        "the dependencies array declares no requirements: {output}"
+    );
     for requirement in requirements {
         assert!(is_exact_pin(requirement), "{requirement:?}: {output}");
     }
