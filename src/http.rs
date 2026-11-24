@@ -1,21 +1,22 @@
 //! Bounded HTTP/1.1 request-head parsing and the startup-built reply plan.
 //!
 //! The parser inspects at most [`MAX_HEAD_BYTES`] of head bytes and never
-//! allocates. [`ResponsePlan`] renders the six fixed replies once from the
-//! build version, so the connection write path only borrows bytes and never
-//! formats.
+//! allocates. [`ResponsePlan`] renders five reply buffers once from the build
+//! version; they serve the seven reply outcomes (200 and 404, each in a
+//! `Full` and a `HeadOnly` form, plus 405, 400, and 431), so the connection
+//! write path only borrows bytes and never formats.
 
-/// The largest request head the parser inspects, in bytes.
+/// The largest request head the parser classifies, in bytes.
+///
+/// Callers feed at most this many bytes; a full window of this size without a
+/// head terminator is [`ParseOutcome::TooLarge`].
 pub const MAX_HEAD_BYTES: usize = 1024;
 
 /// The fixed capacity of every planned reply, in bytes.
 const RESPONSE_BYTES: usize = 512;
 
 /// The largest version text a liveness body accepts, in bytes.
-const MAX_VERSION_BYTES: usize = 128;
-
-/// The digits a planned `Content-Length` value may need.
-const MAX_LENGTH_DIGITS: usize = 3;
+pub const MAX_VERSION_BYTES: usize = 128;
 
 /// The digits a `usize` value may need in decimal.
 const DECIMAL_DIGITS: usize = 20;
@@ -43,42 +44,21 @@ const TOO_LARGE_BODY: &[u8] = b"Request head too large\r\n";
 /// The longest liveness body the plan accepts, in bytes.
 const LIVENESS_MAX_BYTES: usize = LIVENESS_PREFIX.len() + MAX_VERSION_BYTES + LIVENESS_SUFFIX.len();
 
-const _: () = assert!(decimal_len(LIVENESS_MAX_BYTES) <= MAX_LENGTH_DIGITS);
-const _: () = assert!(
-    planned_bytes(STATUS_OK.len(), 0, LIVENESS_MAX_BYTES, MAX_LENGTH_DIGITS) <= RESPONSE_BYTES
-);
-const _: () = assert!(
-    planned_bytes(
-        STATUS_NOT_FOUND.len(),
-        0,
-        NOT_FOUND_BODY.len(),
-        MAX_LENGTH_DIGITS,
-    ) <= RESPONSE_BYTES
-);
+/// The digits a planned `Content-Length` value may need.
+const MAX_LENGTH_DIGITS: usize = decimal_len(LIVENESS_MAX_BYTES);
+
+const _: () = assert!(planned_bytes(STATUS_OK, &[], LIVENESS_MAX_BYTES) <= RESPONSE_BYTES);
+const _: () = assert!(planned_bytes(STATUS_NOT_FOUND, &[], NOT_FOUND_BODY.len()) <= RESPONSE_BYTES);
 const _: () = assert!(
     planned_bytes(
-        STATUS_METHOD_NOT_ALLOWED.len(),
-        ALLOW.len(),
-        METHOD_NOT_ALLOWED_BODY.len(),
-        MAX_LENGTH_DIGITS,
+        STATUS_METHOD_NOT_ALLOWED,
+        ALLOW,
+        METHOD_NOT_ALLOWED_BODY.len()
     ) <= RESPONSE_BYTES
 );
-const _: () = assert!(
-    planned_bytes(
-        STATUS_BAD_REQUEST.len(),
-        0,
-        BAD_REQUEST_BODY.len(),
-        MAX_LENGTH_DIGITS,
-    ) <= RESPONSE_BYTES
-);
-const _: () = assert!(
-    planned_bytes(
-        STATUS_TOO_LARGE.len(),
-        0,
-        TOO_LARGE_BODY.len(),
-        MAX_LENGTH_DIGITS,
-    ) <= RESPONSE_BYTES
-);
+const _: () =
+    assert!(planned_bytes(STATUS_BAD_REQUEST, &[], BAD_REQUEST_BODY.len()) <= RESPONSE_BYTES);
+const _: () = assert!(planned_bytes(STATUS_TOO_LARGE, &[], TOO_LARGE_BODY.len()) <= RESPONSE_BYTES);
 
 /// The request method classes the reply plan distinguishes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,21 +132,26 @@ pub enum ParseOutcome {
 
 /// Classifies the request-head bytes read so far.
 ///
+/// The classification depends only on the bytes, never on how a read was
+/// split: callers pass at most [`MAX_HEAD_BYTES`] bytes, and a longer slice is
+/// classified from its leading window. A full window with no head terminator
+/// is [`ParseOutcome::TooLarge`], while a malformed line inside the window wins
+/// over that size verdict.
+///
 /// Only the request line is parsed; every header line after it is ignored
 /// beyond the `\r\n` discipline that terminates the head. A target is
 /// [`Target::Root`] only when its bytes are exactly `/`.
 #[must_use]
 pub fn parse_head(bytes: &[u8]) -> ParseOutcome {
-    if bytes.len() > MAX_HEAD_BYTES {
-        return ParseOutcome::TooLarge;
-    }
-    match scan_head(bytes) {
-        Scan::Incomplete => ParseOutcome::Incomplete,
-        Scan::Malformed(kind) => ParseOutcome::Malformed(kind),
-        Scan::Line(end) => match parse_request_line(&bytes[..end]) {
+    let window = &bytes[..bytes.len().min(MAX_HEAD_BYTES)];
+    match scan_head(window) {
+        Scan::Line(end) => match parse_request_line(&window[..end]) {
             Ok(request) => ParseOutcome::Complete(request),
             Err(kind) => ParseOutcome::Malformed(kind),
         },
+        Scan::Malformed(kind) => ParseOutcome::Malformed(kind),
+        Scan::Incomplete if window.len() == MAX_HEAD_BYTES => ParseOutcome::TooLarge,
+        Scan::Incomplete => ParseOutcome::Incomplete,
     }
 }
 
@@ -196,9 +181,6 @@ fn scan_head(bytes: &[u8]) -> Scan {
                         return Scan::Line(first_cr.unwrap_or(index));
                     }
                     None => return Scan::Incomplete,
-                    Some(terminator) if terminator[0] == b'\r' => {
-                        return Scan::Malformed(MalformedKind::MissingTerminator);
-                    }
                     Some(_) => {}
                 }
                 first_cr.get_or_insert(index);
@@ -311,7 +293,7 @@ pub enum Reply<'a> {
     HeadOnly(Head<'a>),
 }
 
-/// The six fixed replies, rendered once from the build version.
+/// The five reply buffers, rendered once from the build version.
 pub struct ResponsePlan {
     ok: Wire,
     not_found: Wire,
@@ -421,17 +403,38 @@ impl Wire {
     }
 }
 
+/// One ordered segment of a reply header block.
+#[derive(Clone, Copy)]
+enum Segment<'a> {
+    /// Bytes copied to the wire unchanged.
+    Fixed(&'a [u8]),
+    /// The decimal `Content-Length` value of the body.
+    Length,
+}
+
+/// The header-block segments of a reply, in wire order.
+const fn head_segments<'a>(status: &'a [u8], extra: &'a [u8]) -> [Segment<'a>; 8] {
+    [
+        Segment::Fixed(status),
+        Segment::Fixed(CONTENT_TYPE),
+        Segment::Fixed(CONTENT_LENGTH),
+        Segment::Length,
+        Segment::Fixed(CRLF),
+        Segment::Fixed(CONNECTION_CLOSE),
+        Segment::Fixed(extra),
+        Segment::Fixed(CRLF),
+    ]
+}
+
 fn build(status: &[u8], extra: &[u8], body: &[&[u8]]) -> Wire {
     let body_len: usize = body.iter().map(|part| part.len()).sum();
     let mut builder = Builder::new();
-    builder.push(status);
-    builder.push(CONTENT_TYPE);
-    builder.push(CONTENT_LENGTH);
-    builder.push_decimal(body_len);
-    builder.push(CRLF);
-    builder.push(CONNECTION_CLOSE);
-    builder.push(extra);
-    builder.push(CRLF);
+    for segment in head_segments(status, extra) {
+        match segment {
+            Segment::Fixed(part) => builder.push(part),
+            Segment::Length => builder.push_decimal(body_len),
+        }
+    }
     let head_len = builder.len();
     for part in body.iter().copied() {
         builder.push(part);
@@ -439,16 +442,20 @@ fn build(status: &[u8], extra: &[u8], body: &[&[u8]]) -> Wire {
     builder.finish(head_len)
 }
 
-const fn planned_bytes(status: usize, extra: usize, body: usize, digits: usize) -> usize {
-    status
-        + CONTENT_TYPE.len()
-        + CONTENT_LENGTH.len()
-        + digits
-        + CRLF.len()
-        + CONNECTION_CLOSE.len()
-        + extra
-        + CRLF.len()
-        + body
+/// The worst-case bytes one reply needs, walked over the same segments
+/// [`build`] renders.
+const fn planned_bytes(status: &[u8], extra: &[u8], body: usize) -> usize {
+    let segments = head_segments(status, extra);
+    let mut total = 0;
+    let mut index = 0;
+    while index < segments.len() {
+        total += match segments[index] {
+            Segment::Fixed(part) => part.len(),
+            Segment::Length => MAX_LENGTH_DIGITS,
+        };
+        index += 1;
+    }
+    total + body
 }
 
 const fn decimal_len(value: usize) -> usize {
@@ -699,6 +706,32 @@ mod tests {
     }
 
     #[test]
+    fn head_with_a_suffix_after_the_terminator_is_complete() {
+        let mut head = Vec::from(&b"GET / HTTP/1.1\r\n\r\n"[..]);
+        head.resize(head.len() + 1040, b'x');
+        assert!(head.len() > MAX_HEAD_BYTES);
+        assert!(matches!(parse_head(&head), ParseOutcome::Complete(_)));
+    }
+
+    #[test]
+    fn full_window_without_a_terminator_is_too_large() {
+        let mut head = Vec::from(&b"GET / HTTP/1.1\r\nX: "[..]);
+        head.resize(MAX_HEAD_BYTES, b'a');
+        assert_eq!(head.len(), MAX_HEAD_BYTES);
+        assert_eq!(parse_head(&head), ParseOutcome::TooLarge);
+    }
+
+    #[test]
+    fn malformed_line_in_the_window_wins_over_too_large() {
+        let mut head = Vec::from(&b"GET / HTTP/1.1\n"[..]);
+        head.resize(MAX_HEAD_BYTES + 16, b'a');
+        assert_eq!(
+            parse_head(&head),
+            ParseOutcome::Malformed(MalformedKind::MissingTerminator)
+        );
+    }
+
+    #[test]
     fn bare_line_feed_is_malformed() {
         assert_eq!(
             parse_head(b"GET / HTTP/1.1\n\n"),
@@ -838,18 +871,28 @@ mod tests {
     }
 
     #[test]
-    fn malformed_request_line_selects_the_400_reply() {
+    fn other_target_head_selects_the_head_only_404_reply() {
         let plan = plan();
-        let outcome = parse_head(b"GET / HTTP/1.1\n\n");
-        assert!(matches!(outcome, ParseOutcome::Malformed(_)));
-        assert_eq!(plan.bad_request(), BAD_REQUEST_REPLY);
+        let head_len = NOT_FOUND_REPLY.len() - 11;
+        let reply = plan.reply(complete(b"HEAD /?x HTTP/1.1\r\n\r\n"));
+        let Reply::HeadOnly(head) = reply else {
+            panic!("expected a head-only reply, got {reply:?}");
+        };
+        assert_eq!(head.head(), &NOT_FOUND_REPLY[..head_len]);
+        assert_eq!(head.body_len(), 11);
     }
 
     #[test]
-    fn oversized_head_selects_the_431_reply() {
-        let plan = plan();
+    fn malformed_request_line_is_malformed() {
+        assert_eq!(
+            parse_head(b"GET / HTTP/1.1\rHost: x\r\n\r\n"),
+            ParseOutcome::Malformed(MalformedKind::MissingTerminator)
+        );
+    }
+
+    #[test]
+    fn oversized_head_is_too_large() {
         let head = head_padded_to(MAX_HEAD_BYTES + 1);
         assert_eq!(parse_head(&head), ParseOutcome::TooLarge);
-        assert_eq!(plan.too_large(), TOO_LARGE_REPLY);
     }
 }
