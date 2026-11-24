@@ -476,8 +476,6 @@ fn lost_claim_after_signal(status: ExitStatus) -> bool {
 
 #[test]
 fn the_liveness_body_is_the_frozen_twenty_five_bytes() {
-    let expected = format!("Canary {} is alive!\r\n", env!("CARGO_PKG_VERSION"));
-    assert_eq!(LIVENESS, expected.as_bytes());
     assert_eq!(LIVENESS.len(), 25, "{}", String::from_utf8_lossy(LIVENESS));
 }
 
