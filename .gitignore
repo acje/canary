@@ -3,3 +3,5 @@
 .ooda/
 .beads.gate.lock
 .beads/interactions.jsonl
+.repowise/
+.DS_Store
