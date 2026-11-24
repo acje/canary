@@ -163,6 +163,11 @@ mod tests {
     }
 
     #[test]
+    fn six_digit_zero_is_ephemeral() {
+        assert_eq!(ListenPort::parse(Some("000000")), Ok(ListenPort::Ephemeral));
+    }
+
+    #[test]
     fn lowest_fixed_port_is_accepted() {
         assert_eq!(ListenPort::parse(Some("1")), Ok(fixed("1")));
     }
