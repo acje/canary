@@ -119,7 +119,6 @@ and its MIT license, and runs as UID `10001`.
 ```sh
 podman build --format docker -t canary .
 podman run --rm -e PORT=8080 -p 8080:8080 canary
-docker run --rm -e PORT=8080 -p 8080:8080 canary
 podman inspect --format '{{.State.Health.Status}}' <container>
 ```
 
