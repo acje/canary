@@ -39,6 +39,9 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Docs
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
       - name: Install cargo-deny
         run: cargo install cargo-deny --version 0.19.4 --locked
 
