@@ -33,8 +33,8 @@ reply carries the same headers, `Content-Length` included, and no body.
 `PORT` is the only fatal input and has no default: the binary rejects an absent
 `PORT` with `78` before it binds, and the image sets no default either.
 
-- Absent, non-numeric, or outside `1..=65535`: the process exits `78` before it
-  binds.
+- Absent, empty, not an ASCII decimal integer, not valid Unicode text, or a
+  decoded value outside `0..=65535`: the process exits `78` before it binds.
 - `0`: the kernel chooses the port, and the startup record reports it.
 - Any other value: the listener binds `0.0.0.0:<PORT>`.
 
@@ -45,8 +45,9 @@ declares passes only when the operator supplies `PORT`.
 
 ## Records
 
-`RUST_LOG` selects the severity filter: exactly `off`, `error`, `warn`, or
-`info`. An absent variable defaults to `info` and prints no notice. Every
+`RUST_LOG` selects the severity filter: the value names one of `off`, `error`,
+`warn`, or `info`, case-insensitively, with surrounding ASCII whitespace
+ignored. An absent variable defaults to `info` and prints no notice. Every
 record is one line:
 
 ```text
@@ -63,8 +64,11 @@ level=<token> kind=<kind>[ <key>=<value>]...\r\n
 
 - `startup` is printed once after the bind and names the address the kernel
   actually bound.
-- `tick` reports the counters at most once per second, and only when they move.
-- `shutdown` is the final record after a requested `SIGTERM` or `SIGINT`.
+- `tick` reports the counters at most once per second, and only after `served`
+  or `rejected` moves: a change to `dropped` alone waits for the next such
+  movement. The `dropped` value appears whenever a tick is emitted.
+- `shutdown` is the final record after a requested `SIGTERM` or `SIGINT`, and
+  always carries the final counters.
 - `sink_failure` means diagnostics were lost while the service kept serving:
   the drain was refused, so external visibility degraded but the listener did
   not. It survives every filter except `off`.
