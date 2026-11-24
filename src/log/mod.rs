@@ -154,7 +154,7 @@ impl LogFilter {
 
     /// Whether a record at `level` passes this filter.
     #[must_use]
-    pub const fn allows(self, level: Level) -> bool {
+    pub(crate) const fn allows(self, level: Level) -> bool {
         match self {
             Self::Off => false,
             Self::Error => matches!(level, Level::Error),
