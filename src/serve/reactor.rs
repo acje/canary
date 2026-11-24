@@ -36,7 +36,6 @@ use signal_hook::SigId;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::low_level::pipe as signal_pipe;
 
-use crate::exit::ExitCode;
 use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, ParseOutcome, Reply, ResponsePlan};
 use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DRAIN, LOG_RETRY};
 use crate::log::{LogFilter, LogStore, Record, WriteOutcome};
@@ -265,9 +264,9 @@ pub struct ShutdownReport {
 
 /// A poller or socket operation the reactor could not complete.
 ///
-/// Every variant maps to [`ExitCode::Software`] through
-/// [`ServeError::exit_code`]: a reactor failure is an internal fault, never a
-/// configuration problem.
+/// `main` maps every variant to
+/// [`ExitCode::Software`](crate::exit::ExitCode::Software): a reactor failure
+/// is an internal fault, never a configuration problem.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServeError {
     /// Waiting for events failed.
@@ -280,14 +279,6 @@ pub enum ServeError {
     Deregister(ErrorKind),
     /// Reading the shutdown self-pipe failed.
     Signal(ErrorKind),
-}
-
-impl ServeError {
-    /// The process exit code a reactor failure maps to.
-    #[must_use]
-    pub const fn exit_code(self) -> ExitCode {
-        ExitCode::Software
-    }
 }
 
 impl fmt::Display for ServeError {
@@ -643,7 +634,8 @@ impl Reactor {
     /// failure latch does not suppress it — the last attempt is the one worth
     /// making, and the deadline bounds it.
     ///
-    /// The caller exits [`ExitCode::Ok`] once this returns, whatever the outcome:
+    /// The caller exits [`ExitCode::Ok`](crate::exit::ExitCode::Ok) once this
+    /// returns, whatever the outcome:
     /// a shutdown the process was asked for is a successful stop. Records the
     /// deadline or a failing sink left queued are abandoned with the process.
     /// This final drain queues no [`Record::SinkFailure`] of its own: a failure
@@ -1092,7 +1084,6 @@ mod tests {
         ACCEPT_PER_TURN, Reactor, ServeError, ShutdownSignals, TICK_INTERVAL, TOKEN_LISTENER,
         TOKEN_SIGNAL, TurnOutcome, TurnWait, connection_slot, connection_token,
     };
-    use crate::exit::ExitCode;
     use crate::http::ResponsePlan;
     use crate::log::sink::{self, DrainOutcome, LOG_RETRY};
     use crate::log::{LogFilter, LogStore, QUEUE_SLOTS, Record, WriteOutcome};
@@ -1300,9 +1291,8 @@ mod tests {
     }
 
     #[test]
-    fn a_serve_error_maps_to_software_and_names_its_step() {
+    fn a_serve_error_names_its_step() {
         let error = ServeError::Register(ErrorKind::AlreadyExists);
-        assert_eq!(error.exit_code(), ExitCode::Software);
         assert_eq!(error.to_string(), "reactor register failed: AlreadyExists");
     }
 

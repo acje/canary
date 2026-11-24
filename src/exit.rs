@@ -1,7 +1,5 @@
 //! Closed exit-code contract for the canary process.
 
-use std::fmt;
-
 /// The process status this service may terminate with.
 ///
 /// Codes 74 (`EX_IOERR`, readiness failure) and 75 (`EX_TEMPFAIL`) are
@@ -29,17 +27,6 @@ impl ExitCode {
     }
 }
 
-impl fmt::Display for ExitCode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::Ok => "ok",
-            Self::Config => "config",
-            Self::Software => "software",
-        };
-        write!(formatter, "{name} ({})", self.code())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::ExitCode;
@@ -57,12 +44,5 @@ mod tests {
     #[test]
     fn software_is_ex_software() {
         assert_eq!(ExitCode::Software.code(), 70);
-    }
-
-    #[test]
-    fn display_names_the_outcome_and_status() {
-        assert_eq!(ExitCode::Ok.to_string(), "ok (0)");
-        assert_eq!(ExitCode::Config.to_string(), "config (78)");
-        assert_eq!(ExitCode::Software.to_string(), "software (70)");
     }
 }
