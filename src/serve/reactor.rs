@@ -40,7 +40,7 @@ use crate::http::{MAX_HEAD_BYTES, MAX_REPLY_BYTES, ParseOutcome, Reply, Response
 use crate::log::sink::{self, DrainBudget, DrainOutcome, FLUSH_DRAIN, LOG_RETRY};
 use crate::log::{Counters, LogFilter, LogQueue, QueueOutcome, Record};
 
-use super::slots::{Phase, ReplyChoice, Slots, WriteProgress};
+use super::slots::{ConnectionPhase, ReplyChoice, Slots, WriteProgress};
 use super::{HEAD_BYTES, MAX_CONNECTIONS};
 
 /// The poll token of the listening socket.
@@ -770,9 +770,9 @@ impl Reactor {
     /// Visits the connection in `index` once, following its current phase.
     fn visit(&mut self, index: usize) -> Result<bool, ServeError> {
         match self.slots.phase(index) {
-            Some(Phase::Reading) => self.read_ready(index),
-            Some(Phase::Writing) => self.write_ready(index),
-            Some(Phase::Closing) => {
+            Some(ConnectionPhase::Reading) => self.read_ready(index),
+            Some(ConnectionPhase::Writing) => self.write_ready(index),
+            Some(ConnectionPhase::Closing) => {
                 self.release(index)?;
                 Ok(true)
             }

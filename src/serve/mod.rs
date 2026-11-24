@@ -19,7 +19,7 @@ pub mod reactor;
 pub mod slots;
 
 pub use reactor::{Reactor, ServeError, ShutdownReport, ShutdownSignals, TurnOutcome, TurnWait};
-pub use slots::{Phase, ReplyChoice, Slots, WriteProgress};
+pub use slots::{ConnectionPhase, ReplyChoice, Slots, WriteProgress};
 
 use std::time::Duration;
 

@@ -40,7 +40,7 @@ pub enum WriteProgress {
 
 /// The phase of one occupied slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Phase {
+pub enum ConnectionPhase {
     /// Buffering request-head bytes.
     Reading,
     /// Writing the selected reply.
@@ -243,11 +243,11 @@ impl Slots {
     ///
     /// Returns `None` for a vacant or out-of-range index.
     #[must_use]
-    pub fn phase(&self, index: usize) -> Option<Phase> {
+    pub fn phase(&self, index: usize) -> Option<ConnectionPhase> {
         Some(match &self.entries.get(index)?.as_ref()?.connection {
-            Connection::Reading { .. } => Phase::Reading,
-            Connection::Writing { .. } => Phase::Writing,
-            Connection::Closing => Phase::Closing,
+            Connection::Reading { .. } => ConnectionPhase::Reading,
+            Connection::Writing { .. } => ConnectionPhase::Writing,
+            Connection::Closing => ConnectionPhase::Closing,
         })
     }
 
@@ -307,7 +307,7 @@ impl Default for Slots {
 
 #[cfg(test)]
 mod tests {
-    use super::{Phase, ReplyChoice, Slots, WriteProgress};
+    use super::{ConnectionPhase, ReplyChoice, Slots, WriteProgress};
     use crate::http::{MalformedKind, Method, ParseOutcome, Target};
     use crate::serve::{CONNECTION_DEADLINE, HEAD_BYTES, MAX_CONNECTIONS};
     use mio::net::TcpStream;
@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(slots.acquire(stream, now), Some(0));
         assert_eq!(slots.len(), 1);
         assert!(!slots.is_empty());
-        assert_eq!(slots.phase(0), Some(Phase::Reading));
+        assert_eq!(slots.phase(0), Some(ConnectionPhase::Reading));
     }
 
     #[test]
@@ -385,7 +385,7 @@ mod tests {
         slots.release(first_index);
         assert_eq!(slots.len(), 1);
         assert_eq!(slots.phase(first_index), None);
-        assert_eq!(slots.phase(second_index), Some(Phase::Reading));
+        assert_eq!(slots.phase(second_index), Some(ConnectionPhase::Reading));
         let (replacement, _replacement_peer) = fixture.stream();
         assert_eq!(slots.acquire(replacement, now), Some(first_index));
         assert_eq!(slots.len(), 2);
@@ -575,7 +575,7 @@ mod tests {
         };
         let total = 120;
         assert!(slots.begin_write(index, ReplyChoice::Matched(request), total));
-        assert_eq!(slots.phase(index), Some(Phase::Writing));
+        assert_eq!(slots.phase(index), Some(ConnectionPhase::Writing));
         assert_eq!(slots.pending(index), Some(ReplyChoice::Matched(request)));
         assert_eq!(slots.cursor(index), Some(0));
         assert_eq!(
@@ -598,7 +598,7 @@ mod tests {
         let (stream, _peer) = fixture.stream();
         let index = slots.acquire(stream, now).unwrap();
         assert!(slots.begin_close(index));
-        assert_eq!(slots.phase(index), Some(Phase::Closing));
+        assert_eq!(slots.phase(index), Some(ConnectionPhase::Closing));
         assert_eq!(slots.read_into(index, b"GET / HTTP/1.1\r\n\r\n"), None);
         assert_eq!(slots.pending(index), None);
         assert_eq!(slots.advance_written(index, 0), None);
