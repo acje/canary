@@ -209,6 +209,20 @@ pub struct Counters {
     pub dropped: u64,
 }
 
+impl Counters {
+    fn render(self, kind: &'static str, slot: &mut Slot) -> fmt::Result {
+        let Self {
+            served,
+            rejected,
+            dropped,
+        } = self;
+        write!(
+            slot,
+            "level=info kind={kind} served={served} rejected={rejected} dropped={dropped}\r\n"
+        )
+    }
+}
+
 /// A lifecycle event the reactor records, with no free-form text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Record {
@@ -246,22 +260,8 @@ impl Record {
         let level = self.level().name();
         match self {
             Self::Startup { bind } => write!(slot, "level={level} kind=startup bind={bind}\r\n"),
-            Self::Tick(Counters {
-                served,
-                rejected,
-                dropped,
-            }) => write!(
-                slot,
-                "level={level} kind=tick served={served} rejected={rejected} dropped={dropped}\r\n"
-            ),
-            Self::Shutdown(Counters {
-                served,
-                rejected,
-                dropped,
-            }) => write!(
-                slot,
-                "level={level} kind=shutdown served={served} rejected={rejected} dropped={dropped}\r\n"
-            ),
+            Self::Tick(counters) => counters.render("tick", slot),
+            Self::Shutdown(counters) => counters.render("shutdown", slot),
             Self::FilterUnrecognised => write!(slot, "level={level} kind=filter_default\r\n"),
             Self::SinkFailure { failures } => {
                 write!(
