@@ -25,6 +25,10 @@ const DEADLINE: Duration = Duration::from_secs(5);
 /// The deadline a signalled process is allowed to exit within.
 const EXIT_DEADLINE: Duration = Duration::from_secs(2);
 
+/// The attempts a silent start allows for losing its claimed port to another
+/// process before the child binds.
+const SILENT_ATTEMPTS: usize = 3;
+
 /// The wait a tick test allows for the first aggregate record after a request.
 ///
 /// The reactor emits at most one tick per second, and its first tick is due as
@@ -168,6 +172,21 @@ fn pinned_version(entry: &str) -> &str {
     &spec[..end]
 }
 
+/// Whether `spec` is an exact `=X.Y.Z` pin, with three numeric components.
+///
+/// A major-only or major-minor pin such as `=1.2` lets the resolver choose a
+/// different patch release, so it is not an exact pin.
+fn is_exact_pin(spec: &str) -> bool {
+    let Some(version) = spec.strip_prefix('=') else {
+        return false;
+    };
+    let components: Vec<&str> = version.split('.').collect();
+    components.len() == 3
+        && components.iter().all(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
 /// Whether `haystack` holds `needle` as a contiguous run of bytes.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
@@ -226,9 +245,17 @@ struct Canary {
 }
 
 impl Canary {
-    /// Spawns the binary with exactly `env` set.
+    /// Spawns the binary with exactly `env` set and no arguments.
     fn spawn(env: &[(&str, &OsStr)]) -> Self {
-        let mut child = command(env).spawn().expect("the canary binary starts");
+        Self::spawn_with(env, &[])
+    }
+
+    /// Spawns the binary with exactly `env` set and `args` appended.
+    fn spawn_with(env: &[(&str, &OsStr)], args: &[&str]) -> Self {
+        let mut child = command(env)
+            .args(args)
+            .spawn()
+            .expect("the canary binary starts");
         let stdout = pump(child.stdout.take().expect("standard output is piped"));
         let stderr = pump(child.stderr.take().expect("standard error is piped"));
         Self {
@@ -261,6 +288,9 @@ impl Canary {
     /// is the readiness oracle instead: the process installs its shutdown
     /// handlers before it binds, so a connection the listener accepts proves the
     /// signal would reach a live reactor rather than a process still starting.
+    /// The claimed port is released before the child spawns, so the connection
+    /// may reach a concurrent process's listener instead; a caller that signals
+    /// the child afterwards retries that lost claim.
     fn start_silently(env: &[(&str, &OsStr)]) -> Self {
         let port = claim_port();
         let port_text = port.to_string();
@@ -354,9 +384,15 @@ struct Finished {
     stderr: Vec<String>,
 }
 
-/// Runs the binary to exit within [`DEADLINE`] and collects both streams.
+/// Runs the binary with no arguments to exit within [`DEADLINE`].
 fn run_to_exit(env: &[(&str, &OsStr)]) -> Finished {
-    let mut canary = Canary::spawn(env);
+    run_args_to_exit(env, &[])
+}
+
+/// Runs the binary with `args` to exit within [`DEADLINE`] and collects both
+/// streams.
+fn run_args_to_exit(env: &[(&str, &OsStr)], args: &[&str]) -> Finished {
+    let mut canary = Canary::spawn_with(env, args);
     let status = canary.wait(Instant::now() + DEADLINE);
     let deadline = Instant::now() + DEADLINE;
     Finished {
@@ -364,6 +400,32 @@ fn run_to_exit(env: &[(&str, &OsStr)]) -> Finished {
         stdout: canary.stdout_until_closed(deadline),
         stderr: canary.stderr_until_closed(deadline),
     }
+}
+
+/// Starts the binary silently, requests shutdown, and collects what it printed.
+fn silence_until_shutdown(filter: &str) -> Finished {
+    let env = [("RUST_LOG", OsStr::new(filter))];
+    let mut canary = Canary::start_silently(&env);
+    canary.signal("TERM");
+    let status = canary.wait(Instant::now() + EXIT_DEADLINE);
+    let deadline = Instant::now() + DEADLINE;
+    Finished {
+        status,
+        stdout: canary.stdout_until_closed(deadline),
+        stderr: canary.stderr_until_closed(deadline),
+    }
+}
+
+/// Whether a silent start lost its claimed port to another process.
+///
+/// [`Canary::start_silently`] releases its claim before the child spawns, so a
+/// concurrent process may bind that port first. The child then either exits 78
+/// without a listener of its own, or — when the foreign listener answered the
+/// readiness connection — is killed by the shutdown signal before its handlers
+/// exist, which the operating system reports as a signal rather than a status.
+/// Both are retried; every other outcome belongs to the filter under test.
+fn lost_its_claim(status: ExitStatus) -> bool {
+    matches!(status.code(), None | Some(78))
 }
 
 #[test]
@@ -503,6 +565,83 @@ fn a_bad_or_absent_port_is_rejected_with_the_config_status() {
 }
 
 #[test]
+fn a_health_check_against_a_live_listener_succeeds_without_booting() {
+    let canary = Canary::start(&[("PORT", OsStr::new("0"))]);
+    let port = canary.port().to_string();
+    let finished = run_args_to_exit(&[("PORT", OsStr::new(&port))], &["--health-check"]);
+    assert_eq!(finished.status.code(), Some(0), "{:?}", finished.stderr);
+    assert!(finished.stdout.is_empty(), "{:?}", finished.stdout);
+    assert!(finished.stderr.is_empty(), "{:?}", finished.stderr);
+}
+
+#[test]
+fn a_health_check_against_a_closed_port_fails_with_one_line() {
+    let port = claim_port().to_string();
+    let finished = run_args_to_exit(&[("PORT", OsStr::new(&port))], &["--health-check"]);
+    assert_eq!(finished.status.code(), Some(1), "{:?}", finished.stderr);
+    assert!(finished.stdout.is_empty(), "{:?}", finished.stdout);
+    assert_eq!(finished.stderr.len(), 1, "{:?}", finished.stderr);
+    assert!(
+        finished.stderr[0].starts_with("canary: health check: "),
+        "{:?}",
+        finished.stderr
+    );
+}
+
+#[test]
+fn a_health_check_without_a_port_names_it_and_fails() {
+    let finished = run_args_to_exit(&[], &["--health-check"]);
+    assert_eq!(finished.status.code(), Some(1), "{:?}", finished.stderr);
+    assert!(finished.stdout.is_empty(), "{:?}", finished.stdout);
+    assert_eq!(finished.stderr.len(), 1, "{:?}", finished.stderr);
+    assert!(finished.stderr[0].contains("PORT"), "{:?}", finished.stderr);
+}
+
+#[test]
+fn a_health_check_with_an_ephemeral_port_fails() {
+    let finished = run_args_to_exit(&[("PORT", OsStr::new("0"))], &["--health-check"]);
+    assert_eq!(finished.status.code(), Some(1), "{:?}", finished.stderr);
+    assert!(finished.stdout.is_empty(), "{:?}", finished.stdout);
+    assert_eq!(finished.stderr.len(), 1, "{:?}", finished.stderr);
+    assert!(
+        finished.stderr[0].contains("cannot be probed"),
+        "{:?}",
+        finished.stderr
+    );
+}
+
+#[test]
+fn an_unknown_invocation_is_rejected_with_the_config_status() {
+    let cases: [&[&str]; 3] = [&["--health-check", "--extra"], &["--serve"], &[""]];
+    for args in cases {
+        let finished = run_args_to_exit(&[("PORT", OsStr::new("0"))], args);
+        assert_eq!(finished.status.code(), Some(78), "{args:?}");
+        assert!(
+            finished.stdout.is_empty(),
+            "{args:?}: {:?}",
+            finished.stdout
+        );
+        assert_eq!(finished.stderr.len(), 1, "{args:?}: {:?}", finished.stderr);
+        assert!(
+            finished.stderr[0].contains("usage"),
+            "{args:?}: {:?}",
+            finished.stderr
+        );
+    }
+}
+
+#[test]
+fn an_exact_pin_names_three_numeric_components() {
+    assert!(is_exact_pin("=0.2.191"));
+    assert!(is_exact_pin("=1.2.3"));
+    for rejected in [
+        "0.2.191", "=1.2", "=1", "=1.2.3.4", "=^1.2.3", "=1.2.x", "= 1.2.3", "=", "=1..3", "=1.2.",
+    ] {
+        assert!(!is_exact_pin(rejected), "{rejected:?}");
+    }
+}
+
+#[test]
 fn a_shutdown_signal_ends_the_process_cleanly() {
     for signal in ["TERM", "INT"] {
         let mut canary = Canary::start(&[("PORT", OsStr::new("0"))]);
@@ -531,15 +670,20 @@ fn a_shutdown_signal_ends_the_process_cleanly() {
 #[test]
 fn a_silencing_filter_prints_nothing_and_still_exits_cleanly() {
     for filter in ["off", "warn"] {
-        let env = [("RUST_LOG", OsStr::new(filter))];
-        let mut canary = Canary::start_silently(&env);
-        canary.signal("TERM");
-        let status = canary.wait(Instant::now() + EXIT_DEADLINE);
+        let mut outcome = silence_until_shutdown(filter);
+        for _ in 1..SILENT_ATTEMPTS {
+            if !lost_its_claim(outcome.status) {
+                break;
+            }
+            outcome = silence_until_shutdown(filter);
+        }
+        let Finished {
+            status,
+            stdout,
+            stderr,
+        } = outcome;
         assert_eq!(status.code(), Some(0), "RUST_LOG={filter}");
-        let deadline = Instant::now() + DEADLINE;
-        let stdout = canary.stdout_until_closed(deadline);
         assert!(stdout.is_empty(), "RUST_LOG={filter}: {stdout:?}");
-        let stderr = canary.stderr_until_closed(deadline);
         assert!(stderr.is_empty(), "RUST_LOG={filter}: {stderr:?}");
     }
 }
@@ -640,9 +784,6 @@ fn the_lock_graph_and_manifest_hold_only_the_declared_dependencies() {
     assert_eq!(names, declared, "{entries:?}");
     for entry in &entries {
         let spec = pinned_version(entry);
-        assert!(
-            spec.len() > 1 && spec.starts_with('='),
-            "{entry} is not exact-pinned"
-        );
+        assert!(is_exact_pin(spec), "{entry} is not exact-pinned");
     }
 }

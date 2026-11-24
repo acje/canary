@@ -1,5 +1,6 @@
-//! The canary process: bind the liveness listener, serve one bounded reactor
-//! turn at a time, and exit through the closed [`ExitCode`] contract.
+//! The canary process: dispatch the invocation, serve one bounded reactor turn
+//! at a time, and exit through the closed [`ExitCode`] contract or the health
+//! probe's own status.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -15,21 +16,46 @@ use canary::exit::ExitCode;
 use canary::http::ResponsePlan;
 use canary::log::sink::{self, DrainBudget, FLUSH_DRAIN, NonblockingStdout};
 use canary::log::{LogStore, Record, WriteOutcome};
+use canary::probe::{self, Invocation, ProbeOutcome};
 use canary::serve::{Reactor, ShutdownReport, ShutdownSignals, TurnOutcome, TurnWait};
 
-/// Serves the liveness probe until a shutdown signal and exits with the
-/// [`ExitCode`] of the outcome.
+/// The one-line diagnostic an invocation the process does not implement earns.
+const USAGE: &str = "usage: canary [--health-check]";
+
+/// Dispatches the invocation before any boot work and exits with its status.
+///
+/// [`Invocation::HealthCheck`] runs only the probe: no signal handler, log
+/// store, or listener exists, and the probe's zero/one contract supplies the
+/// status. [`Invocation::Reject`] is a configuration error. Serving is the only
+/// path that boots the runtime.
+fn main() {
+    std::process::exit(process_status(Invocation::parse(
+        std::env::args_os().skip(1),
+    )));
+}
+
+/// The process status `invocation` asks for.
+fn process_status(invocation: Invocation) -> i32 {
+    match invocation {
+        Invocation::Serve => run().code(),
+        Invocation::HealthCheck => {
+            let outcome = probe::check();
+            if let ProbeOutcome::Unhealthy(failure) = outcome {
+                eprintln!("canary: health check: {failure}");
+            }
+            outcome.code()
+        }
+        Invocation::Reject => failed(USAGE, ExitCode::Config).code(),
+    }
+}
+
+/// Assembles the runtime plan, serves turns until shutdown, and reports the
+/// outcome as an exit code.
 ///
 /// The process exits 0 after a requested shutdown, whatever the final flush
 /// managed; 78 when the runtime configuration, the bind, or standard output is
 /// rejected at startup; and 70 when a signal, queue, or reactor step fails
 /// internally. [`ExitCode`] owns the numeric values.
-fn main() {
-    std::process::exit(run().code());
-}
-
-/// Assembles the runtime plan, serves turns until shutdown, and reports the
-/// outcome as an exit code.
 fn run() -> ExitCode {
     let plan = match RuntimePlan::from_env() {
         Ok(plan) => plan,
