@@ -876,6 +876,13 @@ impl Reactor {
     /// happens only when a kernel write accepts fewer bytes than it was offered,
     /// which no reactor-local test can inject, so the split path is bounded and
     /// retained but unexercised here.
+    ///
+    /// A reactor test cannot inject a short write either: `SO_SNDBUF` set on the
+    /// listener does not propagate to the accepted socket (an accepted socket
+    /// measured 52312 bytes of send buffer on this host), and the largest planned
+    /// reply is 153 bytes, so an empty kernel send buffer always accepts a whole
+    /// reply. The [`Slots::advance_written`] cursor test is the portable proof of
+    /// the arithmetic this path relies on.
     fn write_ready(&mut self, index: usize) -> Result<bool, ServeError> {
         let Some(pending) = self.slots.pending(index) else {
             return Ok(false);
