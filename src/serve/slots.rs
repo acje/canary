@@ -298,12 +298,14 @@ impl Slots {
     }
 
     /// The number of occupied slots.
+    #[cfg(test)]
     #[must_use]
     pub const fn len(&self) -> usize {
         self.len
     }
 
     /// Whether no slot is occupied.
+    #[cfg(test)]
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.len == 0
