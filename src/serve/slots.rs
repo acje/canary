@@ -72,18 +72,14 @@ struct Occupant {
     connection: Connection,
 }
 
-struct Slot {
-    occupant: Option<Occupant>,
-}
-
-const _: () = assert!(std::mem::size_of::<Slot>() <= HEAD_BYTES + SLOT_METADATA_BYTES);
+const _: () = assert!(std::mem::size_of::<Option<Occupant>>() <= HEAD_BYTES + SLOT_METADATA_BYTES);
 
 /// The connection slots reserved for the reactor.
 ///
 /// The table is built once from a fixed array; it owns every stream it accepts
 /// and exposes no way to replace or extend that array.
 pub struct Slots {
-    entries: [Slot; MAX_CONNECTIONS],
+    entries: [Option<Occupant>; MAX_CONNECTIONS],
     len: usize,
 }
 
@@ -92,7 +88,7 @@ impl Slots {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            entries: std::array::from_fn(|_| Slot { occupant: None }),
+            entries: std::array::from_fn(|_| None),
             len: 0,
         }
     }
@@ -103,11 +99,8 @@ impl Slots {
     /// Returns `None` when every slot is occupied.
     #[must_use]
     pub fn acquire(&mut self, stream: TcpStream, now: Instant) -> Option<usize> {
-        let index = self
-            .entries
-            .iter()
-            .position(|slot| slot.occupant.is_none())?;
-        self.entries[index].occupant = Some(Occupant {
+        let index = self.entries.iter().position(Option::is_none)?;
+        self.entries[index] = Some(Occupant {
             stream,
             expires_at: now + CONNECTION_DEADLINE,
             connection: Connection::Reading {
@@ -123,10 +116,10 @@ impl Slots {
     ///
     /// A vacant or out-of-range index changes nothing.
     pub fn release(&mut self, index: usize) {
-        let Some(slot) = self.entries.get_mut(index) else {
+        let Some(entry) = self.entries.get_mut(index) else {
             return;
         };
-        if slot.occupant.take().is_some() {
+        if entry.take().is_some() {
             self.len -= 1;
         }
     }
@@ -137,7 +130,7 @@ impl Slots {
     /// Returns `None` for a vacant or out-of-range index.
     #[must_use]
     pub fn stream_mut(&mut self, index: usize) -> Option<&mut TcpStream> {
-        Some(&mut self.entries.get_mut(index)?.occupant.as_mut()?.stream)
+        Some(&mut self.entries.get_mut(index)?.as_mut()?.stream)
     }
 
     /// The head bytes the reading slot `index` can still buffer.
@@ -145,7 +138,7 @@ impl Slots {
     /// Returns `None` when `index` is not a reading slot.
     #[must_use]
     pub fn head_room(&self, index: usize) -> Option<usize> {
-        match &self.entries.get(index)?.occupant.as_ref()?.connection {
+        match &self.entries.get(index)?.as_ref()?.connection {
             Connection::Reading { len, .. } => Some(HEAD_BYTES - *len),
             Connection::Writing { .. } | Connection::Closing => None,
         }
@@ -156,7 +149,7 @@ impl Slots {
     /// Returns `None` when `index` is not a writing slot.
     #[must_use]
     pub fn cursor(&self, index: usize) -> Option<usize> {
-        match &self.entries.get(index)?.occupant.as_ref()?.connection {
+        match &self.entries.get(index)?.as_ref()?.connection {
             Connection::Writing { cursor, .. } => Some(*cursor),
             Connection::Reading { .. } | Connection::Closing => None,
         }
@@ -170,7 +163,7 @@ impl Slots {
     pub fn earliest_deadline(&self) -> Option<Instant> {
         self.entries
             .iter()
-            .filter_map(|slot| slot.occupant.as_ref().map(|occupant| occupant.expires_at))
+            .filter_map(|entry| entry.as_ref().map(|occupant| occupant.expires_at))
             .min()
     }
 
@@ -180,7 +173,7 @@ impl Slots {
     /// [`super::HEAD_BYTES`]. Returns `None` when `index` is not a reading slot.
     #[must_use]
     pub fn read_into(&mut self, index: usize, bytes: &[u8]) -> Option<ParseOutcome> {
-        let occupant = self.entries.get_mut(index)?.occupant.as_mut()?;
+        let occupant = self.entries.get_mut(index)?.as_mut()?;
         let Connection::Reading { head, len } = &mut occupant.connection else {
             return None;
         };
@@ -197,11 +190,7 @@ impl Slots {
     /// Returns `false` when `index` is not a reading slot.
     #[must_use]
     pub fn begin_write(&mut self, index: usize, pending: Pending, total_len: usize) -> bool {
-        let Some(occupant) = self
-            .entries
-            .get_mut(index)
-            .and_then(|slot| slot.occupant.as_mut())
-        else {
+        let Some(occupant) = self.entries.get_mut(index).and_then(|entry| entry.as_mut()) else {
             return false;
         };
         if !matches!(occupant.connection, Connection::Reading { .. }) {
@@ -223,7 +212,7 @@ impl Slots {
     /// when `index` is not a writing slot.
     #[must_use]
     pub fn advance_written(&mut self, index: usize, written: usize) -> Option<WriteProgress> {
-        let occupant = self.entries.get_mut(index)?.occupant.as_mut()?;
+        let occupant = self.entries.get_mut(index)?.as_mut()?;
         let Connection::Writing {
             cursor, reply_len, ..
         } = &mut occupant.connection
@@ -244,11 +233,7 @@ impl Slots {
     /// A slot that is not writing is never finished.
     #[must_use]
     pub fn finished(&self, index: usize) -> bool {
-        let Some(occupant) = self
-            .entries
-            .get(index)
-            .and_then(|slot| slot.occupant.as_ref())
-        else {
+        let Some(occupant) = self.entries.get(index).and_then(|entry| entry.as_ref()) else {
             return false;
         };
         matches!(
@@ -264,7 +249,7 @@ impl Slots {
     /// Returns `None` when `index` is not a writing slot.
     #[must_use]
     pub fn pending(&self, index: usize) -> Option<Pending> {
-        match &self.entries.get(index)?.occupant.as_ref()?.connection {
+        match &self.entries.get(index)?.as_ref()?.connection {
             Connection::Writing { pending, .. } => Some(*pending),
             Connection::Reading { .. } | Connection::Closing => None,
         }
@@ -275,13 +260,11 @@ impl Slots {
     /// Returns `None` for a vacant or out-of-range index.
     #[must_use]
     pub fn phase(&self, index: usize) -> Option<Phase> {
-        Some(
-            match &self.entries.get(index)?.occupant.as_ref()?.connection {
-                Connection::Reading { .. } => Phase::Reading,
-                Connection::Writing { .. } => Phase::Writing,
-                Connection::Closing => Phase::Closing,
-            },
-        )
+        Some(match &self.entries.get(index)?.as_ref()?.connection {
+            Connection::Reading { .. } => Phase::Reading,
+            Connection::Writing { .. } => Phase::Writing,
+            Connection::Closing => Phase::Closing,
+        })
     }
 
     /// Marks slot `index` as closing so it accepts no further reads.
@@ -289,11 +272,7 @@ impl Slots {
     /// Returns `false` for a vacant or out-of-range index.
     #[must_use]
     pub fn begin_close(&mut self, index: usize) -> bool {
-        let Some(occupant) = self
-            .entries
-            .get_mut(index)
-            .and_then(|slot| slot.occupant.as_mut())
-        else {
+        let Some(occupant) = self.entries.get_mut(index).and_then(|entry| entry.as_mut()) else {
             return false;
         };
         occupant.connection = Connection::Closing;
@@ -312,8 +291,8 @@ impl Slots {
     #[must_use]
     pub fn expired(&self, now: Instant, out: &mut [usize; MAX_CONNECTIONS]) -> usize {
         let mut count = 0;
-        for (index, slot) in self.entries.iter().enumerate() {
-            if let Some(occupant) = &slot.occupant
+        for (index, entry) in self.entries.iter().enumerate() {
+            if let Some(occupant) = entry
                 && now > occupant.expires_at
             {
                 out[count] = index;
