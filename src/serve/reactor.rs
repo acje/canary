@@ -86,10 +86,22 @@ pub(crate) const SIGNAL_DRAIN_BYTES: usize = 64;
 /// reports [`TurnOutcome::ShuttingDown`] again.
 pub(crate) const SIGNAL_READS_PER_TURN: usize = 8;
 
-const _: () = assert!(TOKEN_LISTENER < TOKEN_SIGNAL);
-const _: () = assert!(TOKEN_SIGNAL < TOKEN_FIRST_CONNECTION);
-const _: () = assert!(TOKEN_LAST_CONNECTION.checked_add(1).is_some());
-const _: () = assert!(WRITE_BYTES_PER_TURN >= MAX_REPLY_BYTES);
+const _: () = assert!(
+    TOKEN_LISTENER < TOKEN_SIGNAL,
+    "listener token precedes signal token"
+);
+const _: () = assert!(
+    TOKEN_SIGNAL < TOKEN_FIRST_CONNECTION,
+    "signal token precedes first connection token"
+);
+const _: () = assert!(
+    TOKEN_LAST_CONNECTION.checked_add(1).is_some(),
+    "last connection token does not overflow"
+);
+const _: () = assert!(
+    WRITE_BYTES_PER_TURN >= MAX_REPLY_BYTES,
+    "write budget covers the largest reply"
+);
 
 /// The poll token that names the connection in slot `index`.
 #[must_use]
@@ -393,7 +405,7 @@ impl Reactor {
     }
 
     /// Whether the counters moved since the last tick record.
-    fn tick_moved(&self) -> bool {
+    const fn tick_moved(&self) -> bool {
         self.served != self.tick.last_served || self.rejected != self.tick.last_rejected
     }
 
@@ -981,7 +993,7 @@ impl Reactor {
     }
 
     /// Clears the sink's failure latch after a drain the sink took.
-    fn recover_sink(&mut self) {
+    const fn recover_sink(&mut self) {
         self.sink.failed = None;
         self.sink.failure_record_attempted = false;
     }

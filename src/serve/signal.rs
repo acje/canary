@@ -92,7 +92,7 @@ impl ShutdownSignals {
     }
 
     /// The registered read end, for the poller to register.
-    pub(crate) fn receiver_mut(&mut self) -> &mut Receiver {
+    pub(crate) const fn receiver_mut(&mut self) -> &mut Receiver {
         &mut self.receiver
     }
 }

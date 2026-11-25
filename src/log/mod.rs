@@ -79,11 +79,26 @@ const MAX_COUNTER_BYTES: usize = COUNTER_PREFIX_BYTES + 3 * MAX_DECIMAL_U64;
 /// The largest sink-failure line: the prefix plus a maximal `u64` count.
 const MAX_SINK_FAILURE_BYTES: usize = SINK_FAILURE_PREFIX_BYTES + MAX_DECIMAL_U64;
 
-const _: () = assert!(QUEUE_SLOTS.is_power_of_two());
-const _: () = assert!(MAX_STARTUP_BYTES <= SLOT_BYTES);
-const _: () = assert!(MAX_COUNTER_BYTES <= SLOT_BYTES);
-const _: () = assert!(FILTER_DEFAULT_BYTES <= SLOT_BYTES);
-const _: () = assert!(MAX_SINK_FAILURE_BYTES <= SLOT_BYTES);
+const _: () = assert!(
+    QUEUE_SLOTS.is_power_of_two(),
+    "QUEUE_SLOTS is a power of two"
+);
+const _: () = assert!(
+    MAX_STARTUP_BYTES <= SLOT_BYTES,
+    "startup record fits in a slot"
+);
+const _: () = assert!(
+    MAX_COUNTER_BYTES <= SLOT_BYTES,
+    "counter record fits in a slot"
+);
+const _: () = assert!(
+    FILTER_DEFAULT_BYTES <= SLOT_BYTES,
+    "default filter record fits in a slot"
+);
+const _: () = assert!(
+    MAX_SINK_FAILURE_BYTES <= SLOT_BYTES,
+    "sink-failure record fits in a slot"
+);
 
 /// The severity a record carries, the only input to the filter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -405,7 +420,7 @@ impl LogQueue {
     /// that removes the last record resets it. The `len == 0` guard below
     /// therefore cannot observe a stale cursor, and `lengths[head] -
     /// front_offset` cannot underflow.
-    pub(crate) fn consume_front(&mut self, written: usize) -> ConsumeOutcome {
+    pub(crate) const fn consume_front(&mut self, written: usize) -> ConsumeOutcome {
         if self.len == 0 {
             return if written == 0 {
                 ConsumeOutcome::Advanced
@@ -447,7 +462,7 @@ impl LogQueue {
         self.dropped
     }
 
-    fn record_drop(&mut self) {
+    const fn record_drop(&mut self) {
         self.dropped = self.dropped.saturating_add(1);
     }
 }

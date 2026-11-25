@@ -3,8 +3,6 @@
 //! single fatal external input, the dependency-free health probe, the bounded
 //! log queue, and the fixed connection-slot table.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-
 pub mod config;
 pub mod exit;
 pub mod http;

@@ -6,8 +6,6 @@
 //! Every process is killed when its guard is dropped, and every read carries a
 //! deadline, so no test outlives a child that stops responding.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -695,10 +693,9 @@ fn a_silencing_filter_prints_nothing_and_still_exits_cleanly() {
     for filter in ["off", "warn"] {
         let mut outcome = silence_until_shutdown(filter);
         for _ in 1..SILENT_ATTEMPTS {
-            let retry = match &outcome {
-                Err(_) => true,
-                Ok(finished) => lost_claim_after_signal(finished.status),
-            };
+            let retry = outcome
+                .as_ref()
+                .map_or(true, |finished| lost_claim_after_signal(finished.status));
             if !retry {
                 break;
             }

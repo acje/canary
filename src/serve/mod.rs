@@ -41,4 +41,7 @@ pub(crate) const SLOT_METADATA_BYTES: usize = 128;
 /// The bytes the whole slot table may occupy.
 pub(crate) const SLOT_BUDGET_BYTES: usize = 128 * 1024;
 
-const _: () = assert!(MAX_CONNECTIONS * (HEAD_BYTES + SLOT_METADATA_BYTES) <= SLOT_BUDGET_BYTES);
+const _: () = assert!(
+    MAX_CONNECTIONS * (HEAD_BYTES + SLOT_METADATA_BYTES) <= SLOT_BUDGET_BYTES,
+    "connection slot budget fits within SLOT_BUDGET_BYTES"
+);

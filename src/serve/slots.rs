@@ -72,7 +72,10 @@ struct Occupant {
     connection: Connection,
 }
 
-const _: () = assert!(std::mem::size_of::<Option<Occupant>>() <= HEAD_BYTES + SLOT_METADATA_BYTES);
+const _: () = assert!(
+    std::mem::size_of::<Option<Occupant>>() <= HEAD_BYTES + SLOT_METADATA_BYTES,
+    "occupant option fits within a slot's head-plus-metadata budget"
+);
 
 /// The connection slots reserved for the reactor.
 ///

@@ -51,20 +51,30 @@ const LIVENESS_MAX_BYTES: usize = LIVENESS_PREFIX.len() + MAX_VERSION_BYTES + LI
 /// The digits a planned `Content-Length` value may need.
 const MAX_LENGTH_DIGITS: usize = decimal_len(LIVENESS_MAX_BYTES);
 
-const _: () = assert!(planned_bytes(STATUS_OK, &[], LIVENESS_MAX_BYTES) <= MAX_REPLY_BYTES);
-const _: () =
-    assert!(planned_bytes(STATUS_NOT_FOUND, &[], NOT_FOUND_BODY.len()) <= MAX_REPLY_BYTES);
+const _: () = assert!(
+    planned_bytes(STATUS_OK, &[], LIVENESS_MAX_BYTES) <= MAX_REPLY_BYTES,
+    "OK reply fits within MAX_REPLY_BYTES"
+);
+const _: () = assert!(
+    planned_bytes(STATUS_NOT_FOUND, &[], NOT_FOUND_BODY.len()) <= MAX_REPLY_BYTES,
+    "not-found reply fits within MAX_REPLY_BYTES"
+);
 const _: () = assert!(
     planned_bytes(
         STATUS_METHOD_NOT_ALLOWED,
         ALLOW,
         METHOD_NOT_ALLOWED_BODY.len()
-    ) <= MAX_REPLY_BYTES
+    ) <= MAX_REPLY_BYTES,
+    "method-not-allowed reply fits within MAX_REPLY_BYTES"
 );
-const _: () =
-    assert!(planned_bytes(STATUS_BAD_REQUEST, &[], BAD_REQUEST_BODY.len()) <= MAX_REPLY_BYTES);
-const _: () =
-    assert!(planned_bytes(STATUS_TOO_LARGE, &[], TOO_LARGE_BODY.len()) <= MAX_REPLY_BYTES);
+const _: () = assert!(
+    planned_bytes(STATUS_BAD_REQUEST, &[], BAD_REQUEST_BODY.len()) <= MAX_REPLY_BYTES,
+    "bad-request reply fits within MAX_REPLY_BYTES"
+);
+const _: () = assert!(
+    planned_bytes(STATUS_TOO_LARGE, &[], TOO_LARGE_BODY.len()) <= MAX_REPLY_BYTES,
+    "too-large reply fits within MAX_REPLY_BYTES"
+);
 
 /// The request method classes the reply plan distinguishes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -283,7 +293,7 @@ pub(crate) struct HeaderBlock<'a> {
 impl<'a> HeaderBlock<'a> {
     /// The header block bytes, ending with the empty line.
     #[must_use]
-    pub(crate) fn bytes(self) -> &'a [u8] {
+    pub(crate) const fn bytes(self) -> &'a [u8] {
         self.bytes
     }
 }
@@ -509,7 +519,7 @@ impl Builder {
         self.push(&scratch[..length]);
     }
 
-    fn finish(self, head_len: usize) -> Wire {
+    const fn finish(self, head_len: usize) -> Wire {
         Wire {
             bytes: self.bytes,
             len: self.len,

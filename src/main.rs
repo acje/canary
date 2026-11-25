@@ -2,8 +2,6 @@
 //! at a time, and exit through the closed [`ExitCode`] contract or the health
 //! probe's own status.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
@@ -164,7 +162,7 @@ fn run() -> ExitCode {
 /// [`QueueOutcome::Queued`] or [`QueueOutcome::Filtered`] record over an empty
 /// queue lost nothing: the filter is the operator's own choice, and an empty
 /// queue means every queued record reached the sink.
-fn shutdown_flush_incomplete(report: &ShutdownReport, store: &LogQueue) -> bool {
+const fn shutdown_flush_incomplete(report: &ShutdownReport, store: &LogQueue) -> bool {
     matches!(report.final_record, QueueOutcome::Dropped) || !store.is_empty()
 }
 
