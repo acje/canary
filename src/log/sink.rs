@@ -217,17 +217,13 @@ impl NonblockingStdout {
     /// cannot be read or written, which happens when standard output is closed.
     pub fn open() -> io::Result<Self> {
         #[expect(
-            clippy::undocumented_unsafe_blocks,
-            reason = "fcntl runs on the process-owned descriptor 1 with valid F_GETFL/F_SETFL constants, \
-                      and from_raw_fd takes ownership that ManuallyDrop keeps from closing, so no \
-                      descriptor is stolen or double-closed; the style prohibits a plain comment, so this \
-                      reason carries the soundness argument"
-        )]
-        #[expect(
             unsafe_code,
             reason = "reading and writing the descriptor status flags and wrapping the inherited \
                       descriptor both require libc and from_raw_fd"
         )]
+        // SAFETY: fcntl runs on the process-owned descriptor 1 with valid F_GETFL/F_SETFL constants,
+        // and from_raw_fd takes ownership that ManuallyDrop keeps from closing, so no descriptor is
+        // stolen or double-closed.
         let descriptor = unsafe {
             let flags = libc::fcntl(libc::STDOUT_FILENO, libc::F_GETFL);
             if flags < 0 {
