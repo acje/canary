@@ -151,7 +151,7 @@ impl Slots {
     #[must_use]
     pub(crate) fn head_room(&self, index: usize) -> Option<usize> {
         match &self.entries.get(index)?.as_ref()?.connection {
-            Connection::Reading { len, .. } => Some(HEAD_BYTES - *len),
+            Connection::Reading { len, .. } => Some(HEAD_BYTES.saturating_sub(*len)),
             Connection::Writing { .. } | Connection::Closing => None,
         }
     }
@@ -189,7 +189,7 @@ impl Slots {
         let Connection::Reading { head, len } = &mut occupant.connection else {
             return None;
         };
-        let room = HEAD_BYTES - *len;
+        let room = HEAD_BYTES.saturating_sub(*len);
         let take = room.min(bytes.len());
         head[*len..*len + take].copy_from_slice(&bytes[..take]);
         *len += take;
@@ -353,7 +353,7 @@ mod tests {
 
     fn padded_head(len: usize) -> Vec<u8> {
         let mut head = Vec::from(&b"GET / HTTP/1.1\r\nX: "[..]);
-        head.resize(len - 4, b'a');
+        head.resize(len.saturating_sub(4), b'a');
         head.extend_from_slice(b"\r\n\r\n");
         head
     }

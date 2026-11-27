@@ -760,7 +760,7 @@ impl Reactor {
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                 Err(_) => return self.begin_close_and_release(index),
             };
-            budget -= read;
+            budget = budget.saturating_sub(read);
             read_any = true;
             let Some(outcome) = self.slots.read_into(index, &buffer[..read]) else {
                 return Ok(false);

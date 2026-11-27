@@ -1,0 +1,48 @@
+# Reasoned allowlist for the canary corpus.
+#
+# The underflow rule is deliberately conservative: it cannot prove the
+# sibling-field / fixture / guard invariants below from the local AST, yet each
+# site is safe-by-invariant. Converting correct code is out of scope, so each
+# carries an explicit rationale instead.
+
+[[allow]]
+path = "src/http.rs"
+rule = "underflow"
+line = 890
+reason = "NOT_FOUND_REPLY is a fixed const reply whose declared body is a constant 11 bytes, so its length always exceeds 11"
+
+[[allow]]
+path = "src/serve/reactor.rs"
+rule = "underflow"
+line = 1343
+reason = "the test writes exactly the 9-byte GET / HTT prefix, so the head buffer holds at most 9 of HEAD_BYTES (1024)"
+
+[[allow]]
+path = "src/serve/reactor.rs"
+rule = "underflow"
+line = 1442
+reason = "the same loop's drive_until predicate requires slots.len() > held before accepted is read, so the difference is strictly positive"
+
+[[allow]]
+path = "src/log/mod.rs"
+rule = "underflow"
+line = 431
+reason = "the self.len == 0 return guard above ensures the ring is non-empty and front_offset never exceeds lengths[head]"
+
+[[allow]]
+path = "src/serve/slots.rs"
+rule = "underflow"
+line = 135
+reason = "release decrements only when entry.take() returned Some, so the occupied count self.len is at least 1"
+
+[[allow]]
+path = "src/serve/slots.rs"
+rule = "underflow"
+line = 303
+reason = "take_expired decrements only when entry.take() returned an occupant, so the occupied count self.len is at least 1"
+
+[[allow]]
+path = "src/log/sink.rs"
+rule = "underflow"
+line = 384
+reason = "the store_with(1) fixture record is strictly longer than the constant split = 4, so record_len - split is positive"

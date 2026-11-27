@@ -627,7 +627,7 @@ mod tests {
 
     fn head_padded_to(length: usize) -> Vec<u8> {
         let mut head = Vec::from(&b"GET / HTTP/1.1\r\nX: "[..]);
-        head.resize(length - 4, b'a');
+        head.resize(length.saturating_sub(4), b'a');
         head.extend_from_slice(b"\r\n\r\n");
         head
     }
