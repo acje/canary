@@ -70,3 +70,26 @@ jobs:
             echo "the normal graph is [$packages], expected [$expected]" >&2
             exit 1
           fi
+
+      # The AloxStyle rules (no_non_safety_comment / unsafe_needs_safety_marker /
+      # underflow) are enforced here as a build-failing gate. The ref is the
+      # engine-hardening SHA; bump it when acje/aloxstyle is pushed.
+      - name: Check out aloxstyle-lints engine
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: acje/aloxstyle
+          ref: 4341e5ae5190dd12f723aa8a80197d370277cc54
+          path: aloxstyle
+          persist-credentials: false
+
+      - name: Build aloxstyle-lints checker
+        run: |
+          cd "$GITHUB_WORKSPACE/aloxstyle/aloxstyle-lints" && cargo build --release --locked
+
+      - name: AloxStyle gate (fail-closed)
+        run: |
+          set -o pipefail
+          checker="$GITHUB_WORKSPACE/aloxstyle/aloxstyle-lints/target/release/aloxstyle-lints"
+          "$checker" src
+          "$checker" tests
+          "$checker" "$GITHUB_WORKSPACE/aloxstyle/aloxstyle-lints"
